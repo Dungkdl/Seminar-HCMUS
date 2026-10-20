@@ -1,7 +1,5 @@
-# Research data and papers stay local
+# Research data stays local; papers and seminar materials are tracked
 /Data/
-/Paper/
-/Seminar.png
 *.csv
 *.jsonl
 *.parquet
@@ -14,7 +12,6 @@
 *.bin
 *.zip
 *.whl
-*.pdf
 # Generated artifacts
 **/outputs/
 **/runs/
