@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "clindistill-code"
+version = "0.2.0"
+description = "COde privileged clinical distillation, reproducible multi-image training and evaluation"
+requires-python = ">=3.10"
+dependencies = ["numpy", "pandas", "Pillow", "matplotlib", "scikit-learn", "torch>=2.3", "torchvision>=0.18"]
+
+[project.optional-dependencies]
+clinical = ["transformers>=4.40,<6", "huggingface-hub>=0.23,<2", "safetensors>=0.4"]
+
+[tool.setuptools.packages.find]
+include = ["clindistill*"]

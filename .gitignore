@@ -1,0 +1,47 @@
+# Research data and papers stay local
+/Data/
+/Paper/
+/Seminar.png
+*.csv
+*.jsonl
+*.parquet
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.zip
+*.whl
+*.pdf
+# Generated artifacts
+**/outputs/
+**/runs/
+**/audit/
+**/smoke_runs/
+**/offline_preparation/
+**/dist/
+**/build/
+**/extracted/
+**/github-publish/
+**/code_audit_summary.json
+**/environment_report.json
+# Python, editors and credentials
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+venv/
+.cache/
+.pytest_cache/
+.vscode/
+.idea/
+.env
+.env.*
+!.env.example
+kaggle.json
+credentials.json
+*.pem
+*.key

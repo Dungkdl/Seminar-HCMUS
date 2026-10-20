@@ -1,0 +1,17 @@
+{
+  "experiment": "photo_attention",
+  "backbone": "tiny_debug",
+  "pretrained": false,
+  "image_size": 32,
+  "max_photos": 2,
+  "max_radiographs": 1,
+  "feature_dim": 16,
+  "dropout": 0.1,
+  "batch_size": 4,
+  "epochs": 2,
+  "patience": 2,
+  "workers": 0,
+  "amp": false,
+  "debug_max_cases": 12,
+  "bootstrap_repetitions": 20
+}
