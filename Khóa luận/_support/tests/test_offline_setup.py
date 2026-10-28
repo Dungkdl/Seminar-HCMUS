@@ -20,6 +20,33 @@ repair_spec.loader.exec_module(recovery)
 
 
 class OfflineTests(unittest.TestCase):
+    def test_oof_mini_uses_independent_groups_instead_of_first_two_visits(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            images, release, records = synthetic_release(root)
+            for split in ('train', 'validation'):
+                expanded = []
+                for original in records[split]:
+                    for suffix in ('a', 'b', 'c'):
+                        row = dict(original, case_id=original['case_id'] + suffix,
+                            patient_id=original['patient_id'] + ('x' if suffix == 'c' else ''),
+                            split_group=original['split_group'] + ('x' if suffix == 'c' else ''),
+                            bag_signature=original['bag_signature'] + suffix)
+                        expanded.append(row)
+                records[split] = expanded
+                path = release / f'student_single_{split}.jsonl'
+                path.write_text(''.join(json.dumps(r) + '\n' for r in expanded), encoding='utf-8')
+            info = json.loads((release / 'release.json').read_text())
+            info['file_checksums'] = {name: offline.digest(release / name) for name in info['file_checksums']}
+            offline.write_json(release / 'release.json', info)
+            contexts(release, records)
+            offline.make_mini_code(release, images, root / 'mini', per_class=2, independent_groups=True)
+            for split in ('train', 'validation'):
+                selected = [json.loads(line) for line in (root / f'mini/prepared/student_single_{split}.jsonl').read_text().splitlines()]
+                self.assertEqual(len(selected), 12)
+                self.assertEqual(len({r['split_group'] for r in selected}), 12)
+                self.assertTrue(all(r['case_id'].endswith(('a', 'c')) for r in selected))
+
     def test_amp_repair_keeps_assets_and_updates_source_wheel_and_manifest(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

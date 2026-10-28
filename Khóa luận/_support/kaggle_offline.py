@@ -84,7 +84,7 @@ def build_project_wheel(project_root, wheelhouse, staging):
     return wheels[0]
 
 
-def make_mini_code(release_dir, image_root, destination, per_class=2):
+def make_mini_code(release_dir, image_root, destination, per_class=2, *, independent_groups=False):
     """Copy a class-balanced train/validation subset with full original bags. Never read test."""
     release_dir, image_root, destination = map(Path, (release_dir, image_root, destination))
     image_root = image_root.resolve()
@@ -104,12 +104,21 @@ def make_mini_code(release_dir, image_root, destination, per_class=2):
                 raise ValueError(f'Source release checksum mismatch: {path.name}')
         rows = [json.loads(line) for line in records_path.read_text(encoding='utf-8').splitlines() if line]
         selected[split] = []
+        used_groups = set()
         for label in range(len(release['class_names'])):
             candidates = sorted((r for r in rows if r['photo_paths'] and r['single_label_index'] == label),
                                 key=lambda r: r['case_id'])
-            if len(candidates) < per_class:
+            chosen = []
+            for row in candidates:
+                if independent_groups and row['split_group'] in used_groups:
+                    continue
+                chosen.append(row)
+                used_groups.add(row['split_group'])
+                if len(chosen) == per_class:
+                    break
+            if len(chosen) < per_class:
                 raise ValueError(f'Not enough cases for {split}, class {label}.')
-            selected[split].extend(candidates[:per_class])
+            selected[split].extend(chosen)
         ids = {r['case_id'] for r in selected[split]}
         contexts = [json.loads(line) for line in contexts_path.read_text(encoding='utf-8').splitlines() if line]
         contexts = [r for r in contexts if r['case_id'] in ids]
@@ -344,6 +353,34 @@ if OFFLINE_MODE:
     spec.loader.exec_module(offline)
     OFFLINE_ASSETS = offline.activate_bundle(bundle)
     sys.path.insert(0, str(bundle / 'source'))
+    # The optional source/weights add-on is separate from the original dependency bundle.
+    extension_candidates = []
+    for base in [Path('/kaggle/input'), Path('/kaggle/working')]:
+        if not base.exists():
+            continue
+        for current, dirs, files in os.walk(base):
+            here = Path(current)
+            if 'backbone_extension.json' in files:
+                extension_candidates.append(here)
+                dirs[:] = []
+                continue
+            dirs[:] = [d for d in dirs if d not in {'Images', '.cache', '__pycache__', 'runs', 'models', 'wheels'}]
+            if len(here.relative_to(base).parts) >= 8:
+                dirs[:] = []
+    extension_override = globals().get('BACKBONE_EXTENSION_OVERRIDE')
+    if extension_override:
+        extension_candidates = [Path(extension_override)]
+    if len(extension_candidates) > 1:
+        raise RuntimeError('Có nhiều backbone add-on; đặt BACKBONE_EXTENSION_OVERRIDE ở cell đầu.')
+    if extension_candidates:
+        extension_root = extension_candidates[0]
+        extension_spec = importlib.util.spec_from_file_location('backbone_extension',
+            extension_root / 'source/_support/backbone_extension.py')
+        extension_setup = importlib.util.module_from_spec(extension_spec)
+        extension_spec.loader.exec_module(extension_setup)
+        OFFLINE_ASSETS = extension_setup.activate_extension(extension_root, OFFLINE_ASSETS)
+    elif globals().get('REQUIRE_BACKBONE_EXTENSION', False):
+        raise RuntimeError('Gắn dataset code-swin-addon có backbone_extension.json rồi Run All lại.')
     print('Offline setup OK. Local pretrained weights:', OFFLINE_ASSETS['resnet'])
 else:
     print('Local/online mode: no offline installation. Kaggle offline uses notebook 00 bundle.')
