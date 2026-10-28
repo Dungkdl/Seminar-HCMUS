@@ -19,7 +19,7 @@ Dữ liệu dùng chung nằm trong `../Data/`; source và hướng dẫn nằm 
 |---|---|
 | [00 — Kaggle offline setup](COde_00_Kaggle_Offline_Setup.ipynb) | Kiểm tra môi trường, tải wheels Linux + weights khi còn Internet, thử chạy khi chặn mạng, đóng gói |
 | [01 — Data preparation](COde_01_Data_Audit_and_Preparation.ipynb) | Làm sạch tiếng Anh, EDA, kiểm định ảnh/nhãn, khóa split, xuất manifest; **mục 14 tạo clinical embeddings** |
-| [02 — Train](COde_02_Train_Baselines.ipynb) | 13 thí nghiệm chính, 3 ablation tùy chọn; mặc định 3 seed; resume theo từng run |
+| [02 — Train](COde_02_Train_Baselines.ipynb) | Run All: Teacher V/H → selective KD, 3 seed; kiểm tra đầu vào, resume, báo cáo và xuất Student |
 | [03 — Evaluate](COde_03_Evaluate.ipynb) | Metrics, bootstrap, mean/std, so sánh cặp, risk–coverage, phân tích lỗi, xuất Student |
 | [Giải thích kỹ thuật](_support/TECHNICAL_GUIDE.md) | Định nghĩa task, model, field masks, công thức loss, thực nghiệm và các giới hạn |
 | [Cấu hình full run](configs/code/thesis.json) | ResNet-50, số ảnh, batch, tích lũy gradient, epochs, KD weights |
@@ -141,18 +141,20 @@ Không có encoder thì báo lỗi, không tự thay bằng random vectors.
 
 ### C. Train
 
-Mở notebook 02, gắn 4 đầu vào: source, ảnh, prepared, cache. Đặt:
+Mở notebook 02 mới, gắn **3 input**: `code-offline-v1`, `code-training-inputs` (ảnh + prepared),
+output notebook 01 có clinical cache. Chọn GPU, tắt Internet, **Run All**. Cấu hình mặc định:
 
 ```python
 RUN_NAME = 'code_clindistill_v2'
 SEEDS = [2026, 2027, 2028]
-SELECTED = CORE                 # 13 nhánh chính
-# SELECTED = CORE + ABLATIONS  # thêm ưu tiên H, feature KD, relation KD
+EXPERIMENTS = ['kd_selective']  # tự thêm Teacher V/H: 9 lượt train trên 3 seed
 RESUME = True
 ```
 
-Muốn chạy từng phiên: `SELECTED=['photo_attention']`, sau đó `['kd_full']`, rồi `['kd_equal', 'kd_selective']`.
-Teacher cần thiết tự thêm trước Student. Giữ RUN_NAME và config để tiếp tục, không tạo lại split.
+Notebook 02 có một cell cấu hình duy nhất, kiểm tra GPU/AMP, release/cache/ảnh và các nhóm split trước train.
+Tự lưu bảng validation từng seed, mean/std, learning curves và xuất Student mỗi seed vào `exports/`.
+Muốn mở rộng đối chứng/ablation, đổi `EXPERIMENTS`; Teachers phụ thuộc tự thêm. Mặc định không chạy baseline riêng.
+Giữ RUN_NAME và cấu hình nền để tiếp tục, không tạo lại split. Test và đánh giá độc lập ở notebook 03.
 
 Default: **ResNet-50 pretrained ImageNet, 224×224, tối đa 8 photo, batch 4 ca × tích lũy 4, 40 epochs, patience 8, AMP**.
 Notebook in tên GPU/VRAM thật. Không giả định mọi RTX 6000 cùng VRAM.
@@ -168,18 +170,10 @@ Kết quả ghi vào `/kaggle/working/runs/code_clindistill_v2/<experiment>/seed
 `best.pt` chỉ giữ phần cần đánh giá; `last.pt` giữ cả optimizer/scheduler/scaler/RNG để resume cuối epoch.
 **Save Version/giữ output sau phiên**. Checkpoint trong ổ làm việc không tự trở thành bản lưu lâu dài.
 
-Phiên mới: gắn output cũ, copy nguyên thư mục run về `/kaggle/working/runs/`, giữ nguyên code/config/data/cache, bật RESUME.
-Ví dụ cell copy (chỉ chạy nếu destination chưa có):
-
-```python
-from pathlib import Path
-import shutil
-old = Path('/kaggle/input/YOUR-PREVIOUS-OUTPUT/runs/code_clindistill_v2')
-new = Path('/kaggle/working/runs/code_clindistill_v2')
-if new.exists():
-    raise FileExistsError('Destination exists; inspect it before copying.')
-shutil.copytree(old, new)
-```
+Phiên mới: gắn Output notebook train cũ, giữ nguyên code/config/data/cache và `RESUME=True`.
+Notebook 02 tự tìm suite cùng RUN_NAME/protocol trong Input và copy về working trước khi resume.
+Nếu có nhiều bản phù hợp, đặt `PREVIOUS_RUNS_OVERRIDE` tới folder RUN_NAME muốn dùng ở cell cấu hình đầu.
+Notebook 03 vẫn cần folder runs có quyền ghi theo hướng dẫn của notebook đó.
 
 Không train vào `/kaggle/input` chỉ đọc. Chạy cả 3 seed và mọi ablation tạo nhiều GB checkpoint; có thể chia phiên theo nhóm
 thí nghiệm rồi giữ output riêng. Không xóa `last.pt` nếu còn muốn resume. Đường dẫn cache có thể đổi khi chuyển phiên,
@@ -221,8 +215,9 @@ Phân nhóm V/H là giả thuyết thực nghiệm; không gọi V là thông ti
 
 ## Kiểm chứng bản code này
 
-- 12 kiểm thử pipeline CPU đã qua, gồm backend Transformers offline bằng BERT nhỏ khởi tạo cho kiểm thử;
-  thêm 3 kiểm thử offline setup cho subset, môi trường và checksum.
+- 20 kiểm thử CPU đã qua, gồm backend Transformers offline bằng BERT nhỏ, AMP,
+  phục hồi wheel/source/manifest và Run All notebook 02 trên dữ liệu tổng hợp.
+  Kiểm thử notebook xác nhận xuất Student, kiểm tra cache lỗi, resume cùng phiên và phục hồi từ output phiên trước.
 - Đã thực thi cell clinical preparation và toàn bộ cell notebook 02/03 trên COde thật ở chế độ debug:
   16 nhánh, 1 seed, 2 epochs, 12 ca mỗi partition; checkpoint, resume và báo cáo tạo thành công.
 - [Biên bản smoke](_support/smoke_runs/verification_6036cbf08e93/verification.json) là bằng chứng chạy code,

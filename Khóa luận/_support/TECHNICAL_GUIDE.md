@@ -3,6 +3,13 @@
 Tài liệu mô tả code hiện có, không phải kết quả đạt được. Luồng thao tác Kaggle nằm ở [README](../README.md).
 Bản v2 thay trainer visual-only v1 bằng baselines + Teachers + KD, giữ ranh giới 01 xử lý dữ liệu / 02 train / 03 đánh giá.
 
+Notebook 02 hiện mặc định `EXPERIMENTS=['kd_selective']`, seed 2026/2027/2028:
+Teacher V/H và Student selective KD, tổng 9 lượt. Baselines và các đối chứng vẫn có trong source,
+chỉ chạy khi chủ động chọn. Một cell cấu hình điều khiển toàn notebook; Run All thực hiện preflight,
+phục hồi suite phù hợp từ output phiên trước, train, tổng hợp validation và xuất Student từng seed.
+`training_report/` có preflight, kế hoạch, tiến độ, bảng mean/std và learning curves; `exports/` có Student.
+Logic trainer/model vẫn trùng bộ offline đã sửa AMP, nên thay notebook không bắt tải lại bundle.
+
 ## Bổ sung: phiên GPU không có Internet
 
 Notebook `COde_00_Kaggle_Offline_Setup.ipynb` chuẩn bị một lần trên Linux Kaggle online trước luồng 01–03.

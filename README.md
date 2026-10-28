@@ -8,7 +8,7 @@ Pipeline nghiên cứu phân loại ảnh nha khoa, sử dụng thông tin lâm 
 |---|---|
 | [00 — Offline setup](Khóa%20luận/COde_00_Kaggle_Offline_Setup.ipynb) | Chuẩn bị wheels và pretrained weights khi còn Internet |
 | [01 — Data preparation](Khóa%20luận/COde_01_Data_Audit_and_Preparation.ipynb) | Làm sạch, EDA, kiểm định, chia tập và clinical embeddings |
-| [02 — Train](Khóa%20luận/COde_02_Train_Baselines.ipynb) | Baselines, Teachers, knowledge distillation và ablation |
+| [02 — Train](Khóa%20luận/COde_02_Train_Baselines.ipynb) | Teacher V/H, selective KD với 3 seed, resume và xuất Student |
 | [03 — Evaluate](Khóa%20luận/COde_03_Evaluate.ipynb) | Metrics, so sánh thực nghiệm và xuất Student |
 
 ## Các tài liệu và code bổ sung

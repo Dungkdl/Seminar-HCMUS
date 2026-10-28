@@ -9,6 +9,9 @@ from pathlib import Path
 import sys
 import time
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+
 import nbformat
 
 root = Path(__file__).resolve().parents[2]
@@ -22,6 +25,7 @@ from IPython.core.interactiveshell import InteractiveShell
 from IPython.utils.capture import capture_output
 from traitlets.config import Config
 from clindistill.artifacts import code_hash, write_json
+from clindistill.suite import CORE, ABLATIONS
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--full-audit', action='store_true')
@@ -47,6 +51,7 @@ for filename in ['COde_01_Data_Audit_and_Preparation.ipynb',
         source = source.replace('CLINICAL_CACHE_OVERRIDE = None', f'CLINICAL_CACHE_OVERRIDE = {str(cache)!r}')
         source = source.replace("RUN_NAME = 'code_clindistill_v2'", f'RUN_NAME = {run_name!r}')
         source = source.replace('SELECTED = CORE  #', 'SELECTED = CORE + ABLATIONS  #')
+        source = source.replace("EXPERIMENTS = ['kd_selective']", f'EXPERIMENTS = {CORE + ABLATIONS!r}')
         print(f'{filename}: code cell {i + 1}/{len(cells)}', flush=True)
         with capture_output() as captured:
             result = shell.run_cell(source, store_history=False)

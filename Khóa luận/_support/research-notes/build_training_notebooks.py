@@ -1,4 +1,4 @@
-﻿"""Generate the two thin, Kaggle-ready training/evaluation entry points."""
+"""Generate the two thin, Kaggle-ready training/evaluation entry points."""
 from pathlib import Path
 import textwrap
 import nbformat as nbf
@@ -72,115 +72,315 @@ print('Source:', PROJECT_ROOT, '\nPrepared:', PREPARED_ROOT, '\nImages:', IMAGE_
 '''
 
 train = [md('''
-# COde 02 — Baselines, Teachers và ClinDistill trên Kaggle
+# COde 02 — Huấn luyện mô hình khóa luận
 
-**Notebook này chỉ huấn luyện và chọn checkpoint qua validation.** Dữ liệu, split và clinical embeddings được tạo ở notebook 01.
-Giữ tên file cũ để các đường dẫn trước đây vẫn dùng được; nội dung đã mở rộng từ baseline sang toàn bộ nhánh ClinDistill COde.
+**Gắn 3 input rồi Run All:** `code-offline-v1`, `code-training-inputs`, output notebook 01 có clinical cache.
+Chọn GPU và tắt Internet khi chạy bằng bundle. Không chạy lại notebook 00/01 trong notebook này.
 
-Trước Run All: gắn **source**, **COde có Images/**, **prepared release**, **clinical cache** vào Kaggle.
-Nếu chưa có cache, dùng mục 14 notebook 01; có thể chạy riêng mục đó với prepared release đã có.
-Bật GPU. Giữ torch/torchvision của môi trường Kaggle; không cài đè CUDA stack.
-Đọc README nếu Internet bị tắt và cần gắn trọng số ResNet từ dataset riêng.
+Mặc định: **Teacher V + Teacher H → selective KD**, 3 seed, dữ liệu đầy đủ, ResNet-50 pretrained,
+40 epochs tối đa, early stopping theo validation macro-F1. Tổng **9 lượt train**, không chạy baseline riêng.
+Student sau huấn luyện chỉ dùng ảnh. Kết quả chọn mô hình ở đây là **validation**; notebook 03 đánh giá theo protocol đã khóa.
 
-Student chỉ nhận ảnh khi suy luận. Teacher full/V/H dùng cùng ảnh với Student; không cấp X-quang riêng cho Teacher.
-Nhánh photo+X-ray là baseline riêng. Nhãn hiện tại là **một nhóm bệnh được ghi nhận**, không phải bệnh duy nhất của bệnh nhân.
-'''), code(BOOTSTRAP), md('''
-## 1. Cấu hình thí nghiệm
-
-`CORE` gồm 13 nhánh: single-photo, mean, Attention MIL, Set attention, photo+X-ray;
-clinical-only/full/V/H Teachers; clinical KD, full KD, equal-group KD và selective-group KD.
-`ABLATIONS` bổ sung trọng số ưu tiên H, feature KD và relation KD.
-
-Mặc định chạy core trên 3 seed. Có thể chọn một phần, ví dụ `SELECTED=['kd_full']`: Teacher cần thiết được thêm tự động.
-Mỗi nhánh/seed có thư mục riêng và resume riêng. Chạy cả bộ có thể cần nhiều phiên; không ước lượng thời gian chỉ từ tên RTX 6000.
-
-**Batch mặc định 4 ca, tích lũy 4 bước**, tối đa 8 ảnh/ca, 224×224, AMP. Đây là cấu hình khởi đầu, không cam kết vừa mọi GPU.
-Nếu OOM, giảm batch và tăng tích lũy, dùng RUN_NAME mới; giữ cùng cấu hình cho các nhánh so sánh.
-Gradient accumulation không làm BatchNorm tương đương batch vật lý lớn.
+Cell tiếp theo là nơi duy nhất chỉnh đường dẫn, seed, nhánh nghiên cứu hoặc resume.
 '''), code(r'''
-import torch
-from dataclasses import replace
-from clindistill.config import TrainConfig
-from clindistill.artifacts import verify_release, read_json
-from clindistill.suite import CORE, ABLATIONS, expand_plan, run_suite
+from pathlib import Path
+import os, sys, json, time
 
-SMOKE_TEST = os.environ.get('CLINDISTILL_SMOKE_TEST') == '1'
+# Cấu hình duy nhất. Bình thường giữ nguyên và Run All.
+SMOKE_TEST = os.environ.get('CLINDISTILL_SMOKE_TEST') == '1'  # chỉ phục vụ kiểm tra phần mềm
+OFFLINE_MODE = Path('/kaggle').exists() and not SMOKE_TEST
+OFFLINE_BUNDLE_OVERRIDE = None
+PROJECT_ROOT_OVERRIDE = None
+PREPARED_ROOT_OVERRIDE = None
+IMAGE_ROOT_OVERRIDE = None
+CLINICAL_CACHE_OVERRIDE = None
+OUTPUT_ROOT_OVERRIDE = None
+PREVIOUS_RUNS_OVERRIDE = None  # folder RUN_NAME từ output phiên cũ; None = tự tìm
+
 RUN_NAME = 'code_clindistill_v2'
 SEEDS = [2026, 2027, 2028] if not SMOKE_TEST else [2026]
-SELECTED = CORE  # CORE + ABLATIONS, hoặc ['photo_attention'], hoặc ['kd_selective']
+EXPERIMENTS = ['kd_selective']  # Teacher V/H cần thiết được thêm tự động
 RESUME = True
-BACKBONE_WEIGHTS_PATH = OFFLINE_ASSETS['resnet'] if globals().get('OFFLINE_ASSETS') and not SMOKE_TEST else None
 RUN_TRAIN = True
+CHECK_IMAGE_FILES = True
+SESSION_STARTED = time.monotonic()
 
-base_config = TrainConfig.load(PROJECT_ROOT / 'configs' / 'code' /
-                               ('smoke_cpu.json' if SMOKE_TEST else 'thesis.json'))
-base_config = replace(base_config, backbone_weights_path=BACKBONE_WEIGHTS_PATH)
-RUNS_ROOT = (OUTPUT_ROOT / '_support' / 'smoke_runs' / RUN_NAME if SMOKE_TEST
-             else OUTPUT_ROOT / 'runs' / RUN_NAME)
-release = verify_release(PREPARED_ROOT, splits=['train', 'validation'])
-if torch.cuda.is_available():
-    gpu = torch.cuda.get_device_properties(0)
-    print('GPU:', gpu.name, '| VRAM GiB:', round(gpu.total_memory / 2**30, 2))
-    print('PyTorch:', torch.__version__, '| CUDA:', torch.version.cuda)
-elif RUN_TRAIN and not SMOKE_TEST:
-    raise RuntimeError('Bật GPU cho full run. SMOKE_TEST=True chỉ kiểm tra CPU, không tạo kết quả nghiên cứu.')
-if any(n.startswith(('teacher_', 'kd_')) for n in expand_plan(SELECTED)) and CLINICAL_CACHE is None:
-    raise RuntimeError('Thiếu clinical cache. Chạy mục 14 notebook 01 và gắn folder cache vào Kaggle.')
-print('Release:', release['release_id'], '|', release['stage'])
-print('Plan:', expand_plan(SELECTED), '| seeds:', SEEDS)
-print('Run folder:', RUNS_ROOT)
-print(json.dumps(base_config.to_dict(), indent=2))
+if not RUN_NAME or Path(RUN_NAME).name != RUN_NAME or RUN_NAME in {'.', '..'}:
+    raise ValueError('RUN_NAME phải là tên một folder.')
+if not SEEDS or len(SEEDS) != len(set(SEEDS)):
+    raise ValueError('Danh sách seed rỗng hoặc trùng.')
+print('Chế độ:', 'DEBUG — không dùng làm kết quả nghiên cứu' if SMOKE_TEST else 'HUẤN LUYỆN ĐẦY ĐỦ')
 '''), md('''
-## 2. Huấn luyện
+## 1. Tự thiết lập offline và tìm đầu vào
 
-Teacher được train trước, đóng băng `eval()` + `requires_grad_(False)` trong KD. Chọn `best.pt` bằng macro-F1 validation.
-Loss Student = CE + λ KD; KD dùng KL(Teacher || Student) với nhiệt độ T và hệ số T².
-Selective KD chuẩn hóa trọng số V/H trên nhóm có dữ liệu của từng ca; không có clinical thì chỉ dùng CE.
-V/H là cách phân nhóm trường để kiểm chứng giả thuyết, **chưa phải visualizability được chuyên gia xác nhận**.
+Kiểm tra checksum, phiên bản môi trường, cài từ wheels và dùng weights trong bundle.
+Báo `Offline setup OK` rồi notebook tự tìm prepared release, ảnh và cache đúng release.
+Nếu có nhiều phiên bản khác nhau, điền đường dẫn override ở cell cấu hình đầu tiên.
+'''), code(offline_setup.BOOTSTRAP_CELL.replace(
+    "OFFLINE_MODE = Path('/kaggle').exists()", '# OFFLINE_MODE lấy từ cell cấu hình đầu tiên.').replace(
+    'OFFLINE_BUNDLE_OVERRIDE = None  # folder chứa offline_manifest.json',
+    '# OFFLINE_BUNDLE_OVERRIDE lấy từ cell cấu hình đầu tiên.')),
+code(BOOTSTRAP.replace('PROJECT_ROOT_OVERRIDE = None', 'PROJECT_ROOT_OVERRIDE = globals().get("PROJECT_ROOT_OVERRIDE")').replace(
+    'PREPARED_ROOT_OVERRIDE = None', 'PREPARED_ROOT_OVERRIDE = globals().get("PREPARED_ROOT_OVERRIDE")').replace(
+    'IMAGE_ROOT_OVERRIDE = None', 'IMAGE_ROOT_OVERRIDE = globals().get("IMAGE_ROOT_OVERRIDE")').replace(
+    'CLINICAL_CACHE_OVERRIDE = None', 'CLINICAL_CACHE_OVERRIDE = globals().get("CLINICAL_CACHE_OVERRIDE")').replace(
+    "OUTPUT_ROOT = Path('/kaggle/working') if Path('/kaggle/working').exists() else PROJECT_ROOT",
+    "OUTPUT_ROOT = Path(OUTPUT_ROOT_OVERRIDE) if OUTPUT_ROOT_OVERRIDE else (Path('/kaggle/working') if Path('/kaggle/working').exists() else PROJECT_ROOT)")),
+md('''
+## 2. Kiểm tra trước huấn luyện và lập kế hoạch
 
-Default V:H=3:1; `kd_equal` dùng 1:1; `kd_higher_h` dùng 1:3. Không chọn trọng số qua test.
-Trong nhánh chỉ ảnh chụp, trường mô tả X-quang bị mask. Teacher và Student nhận cùng tensor ảnh của minibatch KD.
-
-Kaggle hết phiên: Save Version để giữ output, gắn output phiên trước rồi copy **nguyên folder RUN_NAME** vào
-`/kaggle/working/runs/` trước khi Run All. Không resume trực tiếp vào `/kaggle/input` chỉ đọc.
-Config/code/data/cache/Teacher đổi sẽ bị từ chối resume; dùng RUN_NAME mới.
+Kiểm tra GPU, pretrained forward với AMP, manifest train/validation, giao bệnh nhân/ảnh,
+clinical cache, các ảnh được dùng và cấu hình resume. Không đọc partition test.
+Ghi lại kế hoạch, release, source hash, cache fingerprint và cấu hình; không tự đổi batch/loss khi gặp lỗi.
 '''), code(r'''
-summaries = []
-if RUN_TRAIN:
-    summaries = run_suite(PREPARED_ROOT, IMAGE_ROOT, RUNS_ROOT, base_config,
-                         clinical_cache=CLINICAL_CACHE, selected=SELECTED, seeds=SEEDS, resume=RESUME)
-'''), md('''
-## 3. Kiểm tra validation và thời gian chạy
-
-Đây là số liệu chọn mô hình. Kết quả CPU smoke không có ý nghĩa đánh giá phương pháp.
-Ở từng run: `best.pt`, `last.pt`, `history.json`, `validation_predictions.csv`, `run_config.json`, `readiness.json`.
-`train_kd` ghi phần loss distillation đã nhân các hệ số; feature/relation là ablation riêng, mặc định tắt.
-'''), code(r'''
+import gc, shutil
+import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import torch
 from IPython.display import display
-if summaries:
-    frame = pd.DataFrame(summaries)
-    display(frame[['experiment', 'seed', 'complete', 'epochs_completed', 'best_validation_macro_f1', 'debug_run']])
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4))
-    for name in expand_plan(SELECTED):
-        history = pd.DataFrame(read_json(RUNS_ROOT / name / f'seed_{SEEDS[0]}' / 'history.json'))
-        axes[0].plot(history.epoch, history.train_loss, label=name)
-        axes[1].plot(history.epoch, history.validation_macro_f1, label=name)
-    axes[0].set_title('Training objective (different objectives across methods)')
-    axes[1].set_title('Validation macro-F1 — first seed')
-    for ax in axes:
-        ax.set_xlabel('Epoch')
-    axes[1].legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8)
-    plt.tight_layout()
-    plt.show()
-'''), md('''
-## 4. Tiếp theo
+from clindistill.config import TrainConfig
+from clindistill.artifacts import code_hash, file_hash, object_hash, read_json, verify_release, write_json
+from clindistill.clinical import ClinicalCache
+from clindistill.data import load_records, check_disjoint
+from clindistill.models import VisualBagClassifier
+from clindistill.suite import CORE, ABLATIONS, expand_plan, run_suite
 
-Mở notebook 03, đặt cùng RUN_NAME. Notebook 03 đọc các run đã hoàn thành để tạo bảng mean/std, CI và biểu đồ.
-Đừng thay config sau khi xem test. Tình trạng `experimental` của dữ liệu vẫn được ghi trong mọi báo cáo.
-MeMoSA, nhãn tooth/region và đa nhãn đầy đủ chưa có ground truth đã xác nhận trong bộ thực nghiệm này;
-không tự sinh nhãn để lấp các phần đó của sơ đồ seminar.
+PLAN = expand_plan(EXPERIMENTS)
+release = verify_release(PREPARED_ROOT, splits=['train', 'validation'])
+if release.get('debug_subset') and not SMOKE_TEST:
+    raise ValueError('Đang gắn bộ mini. Hãy gắn prepared release đầy đủ.')
+if not SMOKE_TEST and not torch.cuda.is_available():
+    raise RuntimeError('Chưa nhận GPU. Chọn Accelerator rồi chạy lại từ đầu.')
+device = torch.device('cuda' if torch.cuda.is_available() and not SMOKE_TEST else 'cpu')
+base_config = TrainConfig.load(PROJECT_ROOT / 'configs/code' / ('smoke_cpu.json' if SMOKE_TEST else 'thesis.json'))
+from dataclasses import replace
+BACKBONE_WEIGHTS_PATH = OFFLINE_ASSETS['resnet'] if globals().get('OFFLINE_ASSETS') and not SMOKE_TEST else None
+base_config = replace(base_config, backbone_weights_path=BACKBONE_WEIGHTS_PATH)
+if not SMOKE_TEST:
+    if base_config.debug_max_cases or base_config.backbone == 'tiny_debug' or not base_config.pretrained:
+        raise ValueError('Full run cần pretrained backbone và debug_max_cases=0.')
+    if base_config.freeze_backbone:
+        raise ValueError('Cấu hình full run phải fine-tune backbone.')
+    if OFFLINE_MODE and (not BACKBONE_WEIGHTS_PATH or not Path(BACKBONE_WEIGHTS_PATH).is_file()):
+        raise FileNotFoundError('Thiếu pretrained weights trong bundle offline.')
+
+records = {split: load_records(PREPARED_ROOT, split, 'photo_attention', base_config.debug_max_cases)
+           for split in ('train', 'validation')}
+check_disjoint(records['train'], records['validation'])
+counts = np.bincount([r['single_label_index'] for r in records['train']], minlength=len(release['class_names']))
+if (counts == 0).any():
+    raise ValueError('Train thiếu lớp; quay lại prepared release.')
+cache_fingerprint = None
+if any(name.startswith(('teacher_', 'kd_')) for name in PLAN):
+    if CLINICAL_CACHE is None:
+        raise FileNotFoundError('Gắn output notebook 01 có metadata.json, train.npz và validation.npz.')
+    clinical_check = ClinicalCache(CLINICAL_CACHE, release['release_id'], allow_debug=SMOKE_TEST)
+    for split, rows in records.items():
+        missing = [r['case_id'] for r in rows if r['case_id'] not in clinical_check.lookup]
+        if missing:
+            raise ValueError(f'Clinical cache thiếu {len(missing)} ca {split}.')
+    cache_fingerprint = clinical_check.fingerprint
+    del clinical_check
+
+required_images = {p for rows in records.values() for r in rows for p in r['photo_paths']}
+if 'photo_xray_attention' in PLAN:
+    required_images.update(p for rows in records.values() for r in rows for p in r['radiograph_paths'])
+if CHECK_IMAGE_FILES:
+    print(f'Kiểm tra đường dẫn {len(required_images):,} ảnh...', flush=True)
+    image_base = IMAGE_ROOT.resolve()
+    for relative in sorted(required_images):
+        path = (image_base / relative).resolve()
+        if image_base not in path.parents or not path.is_file():
+            raise FileNotFoundError(f'Ảnh thiếu hoặc đường dẫn không hợp lệ: {relative}')
+
+# Xác nhận pretrained forward/AMP trước khi bắt đầu các lượt train dài.
+probe_model = VisualBagClassifier(base_config, num_classes=len(release['class_names'])).to(device).eval()
+with torch.no_grad(), torch.autocast(device_type=device.type, enabled=base_config.amp and device.type == 'cuda'):
+    probe = probe_model(torch.zeros(1, 2, 3, base_config.image_size, base_config.image_size, device=device),
+        torch.ones(1, 2, dtype=torch.bool, device=device), torch.zeros(1, 2, dtype=torch.long, device=device))
+if not torch.isfinite(probe['logits']).all():
+    raise FloatingPointError('Pretrained forward có giá trị không hữu hạn.')
+parameter_count = sum(p.numel() for p in probe_model.parameters())
+del probe_model, probe
+gc.collect()
+if device.type == 'cuda':
+    torch.cuda.empty_cache()
+    print('GPU:', torch.cuda.get_device_name(0), '| số GPU hiện có:', torch.cuda.device_count())
+    print('Mỗi lượt train hiện sử dụng GPU 0; các lượt chạy tuần tự.')
+
+RUNS_ROOT = (OUTPUT_ROOT / '_support/smoke_runs' / RUN_NAME if SMOKE_TEST else OUTPUT_ROOT / 'runs' / RUN_NAME)
+expected_protocol = {'base_config': base_config.to_dict(), 'code_sha256': code_hash(), 'release_id': release['release_id']}
+# Tự phục hồi nguyên suite từ output notebook train đã gắn vào Input.
+previous = Path(PREVIOUS_RUNS_OVERRIDE).resolve() if PREVIOUS_RUNS_OVERRIDE else None
+if previous is None and RESUME and not RUNS_ROOT.exists():
+    matches = []
+    if Path('/kaggle/input').exists():
+        for current, dirs, files in os.walk('/kaggle/input'):
+            here = Path(current)
+            if 'protocol.json' in files and here.name == RUN_NAME:
+                if object_hash(read_json(here / 'protocol.json')) == object_hash(expected_protocol):
+                    matches.append(here)
+                dirs[:] = []
+            else:
+                dirs[:] = [d for d in dirs if d not in {'Images', '.cache', '__pycache__', 'models', 'wheels'}]
+            if len(here.relative_to('/kaggle/input').parts) >= 9:
+                dirs[:] = []
+    if len(matches) > 1:
+        raise ValueError('Có nhiều output resume phù hợp; đặt PREVIOUS_RUNS_OVERRIDE ở cell đầu.')
+    previous = matches[0] if matches else None
+if previous is not None and not RUNS_ROOT.exists():
+    if object_hash(read_json(previous / 'protocol.json')) != object_hash(expected_protocol):
+        raise ValueError('Output cũ khác code/config/release. Dùng đúng protocol hoặc RUN_NAME mới.')
+    print('Khôi phục checkpoint từ:', previous, flush=True)
+    RUNS_ROOT.parent.mkdir(parents=True, exist_ok=True)
+    staging = RUNS_ROOT.with_name(RUN_NAME + '.restoring')
+    shutil.copytree(previous, staging, dirs_exist_ok=True)
+    staging.rename(RUNS_ROOT)
+if (RUNS_ROOT / 'protocol.json').exists():
+    if object_hash(read_json(RUNS_ROOT / 'protocol.json')) != object_hash(expected_protocol):
+        raise ValueError('RUN_NAME đã có protocol khác; giữ kết quả cũ và đặt tên run mới.')
+
+RUNS_ROOT.mkdir(parents=True, exist_ok=True)
+REPORT_ROOT = RUNS_ROOT / 'training_report'
+REPORT_ROOT.mkdir(exist_ok=True)
+execution_plan = [{'experiment': name, 'seed': seed} for seed in SEEDS for name in PLAN]
+preflight = {'release_id': release['release_id'], 'release_stage': release['stage'],
+    'pending_reviews': release.get('pending_reviews', []), 'code_sha256': code_hash(),
+    'cache_fingerprint': cache_fingerprint, 'debug_run': SMOKE_TEST,
+    'train_cases': len(records['train']), 'validation_cases': len(records['validation']),
+    'checked_image_paths': len(required_images) if CHECK_IMAGE_FILES else 0,
+    'gpu': torch.cuda.get_device_name(0) if device.type == 'cuda' else 'cpu',
+    'torch': torch.__version__, 'device': str(device), 'base_config': base_config.to_dict(),
+    'requested_experiments': EXPERIMENTS, 'expanded_plan': PLAN, 'seeds': SEEDS,
+    'planned_runs': len(execution_plan), 'test_evaluated': False, 'publication_ready': False}
+write_json(REPORT_ROOT / 'preflight.json', preflight)
+write_json(REPORT_ROOT / 'execution_plan.json', execution_plan)
+print(f"PREFLIGHT PASS | train={len(records['train']):,}, validation={len(records['validation']):,} | {len(execution_plan)} lượt")
+print('Release:', release['stage'], '| pending reviews:', len(release.get('pending_reviews', [])))
+print('Ngân sách:', base_config.epochs, 'epochs tối đa; patience:', base_config.patience,
+      '| batch:', base_config.batch_size, '| accumulation:', base_config.accumulation_steps)
+print('Kết quả:', RUNS_ROOT)
+display(pd.DataFrame(execution_plan))
+'''), md('''
+## 3. Huấn luyện đề xuất trên dữ liệu đầy đủ
+
+Teacher V/H học trước và được đóng băng khi distill Student. V:H=3:1, T=4, loss gồm CE + KD.
+Ảnh Teacher và Student trong KD giống nhau; mô tả X-quang bị mask ở nhánh chỉ ảnh chụp.
+V/H là giả thuyết phân nhóm trường cần kiểm chứng, không phải nhãn visualizability từ chuyên gia.
+
+Mỗi epoch lưu `last.pt`; `best.pt` chọn bằng validation macro-F1. Chạy lại Run All sẽ resume ở epoch đã lưu.
+Qua phiên khác: lưu **Output**, gắn output notebook train cũ vào Input; notebook tự copy suite phù hợp về working.
+Không có cơ chế tự vượt giới hạn phiên Kaggle. Giữ Output ở chế độ Private vì predictions/config có ID hồ sơ.
+'''), code(r'''
+def collect_progress():
+    rows = []
+    for item in execution_plan:
+        folder = RUNS_ROOT / item['experiment'] / f"seed_{item['seed']}"
+        summary_file = folder / 'summary.json'
+        row = {**item, 'complete': False, 'epochs_completed': 0, 'best_validation_macro_f1': None}
+        if summary_file.exists():
+            row.update(read_json(summary_file))
+        elif (folder / 'history.json').exists():
+            history = read_json(folder / 'history.json')
+            row['epochs_completed'] = len(history)
+            row['best_validation_macro_f1'] = max((h['validation_macro_f1'] for h in history), default=None)
+        if (folder / 'best_validation_metrics.json').exists():
+            metrics = read_json(folder / 'best_validation_metrics.json')
+            row.update({k: metrics.get(k) for k in ['accuracy', 'macro_f1',
+                'balanced_accuracy_observed_classes', 'macro_auroc_defined_classes', 'ece_10_bins', 'brier_multiclass']})
+        rows.append(row)
+    return rows
+
+summaries = []
+training_error = None
+try:
+    if RUN_TRAIN:
+        for seed in SEEDS:
+            free = shutil.disk_usage(RUNS_ROOT).free
+            if not SMOKE_TEST and free < max(1024**3, int(parameter_count * 16 * 2)):
+                raise OSError('Không đủ chỗ ghi checkpoint nguyên tử. Lưu Output và tiếp tục ở phiên có đủ dung lượng.')
+            print(f'\n===== SEED {seed} | {len(PLAN)} phương pháp =====', flush=True)
+            summaries.extend(run_suite(PREPARED_ROOT, IMAGE_ROOT, RUNS_ROOT, base_config,
+                clinical_cache=CLINICAL_CACHE, selected=EXPERIMENTS, seeds=[seed], resume=RESUME,
+                device=str(device)))
+except BaseException as exc:
+    training_error = f'{type(exc).__name__}: {exc}'
+    raise
+finally:
+    progress_rows = collect_progress()
+    progress = pd.DataFrame(progress_rows)
+    progress.to_csv(REPORT_ROOT / 'run_progress.csv', index=False)
+    completed = sum(bool(r['complete']) for r in progress_rows)
+    write_json(REPORT_ROOT / 'suite_status.json', {'complete': completed == len(execution_plan),
+        'completed_runs': completed, 'planned_runs': len(execution_plan), 'error': training_error,
+        'session_seconds': time.monotonic() - SESSION_STARTED, 'test_evaluated': False,
+        'debug_run': SMOKE_TEST, 'release_stage': release['stage'], 'publication_ready': False})
+    print(f'Đã hoàn thành {completed}/{len(execution_plan)} lượt. Output:', RUNS_ROOT, flush=True)
+'''), md('''
+## 4. Bảng kết quả, learning curves và Student để bàn giao
+
+Tổng hợp checkpoint tốt nhất trên validation cho từng seed; báo sample std, không thay std thiếu bằng 0.
+Xuất Student chỉ dùng ảnh cho từng seed. Bảng này là kết quả chọn mô hình, không phải đánh giá test độc lập.
+Thực hiện CI, so sánh và test trong notebook 03 sau khi chốt protocol và rà soát release.
+'''), code(r'''
+import matplotlib.pyplot as plt
+from clindistill.reporting import export_student
+
+progress = pd.DataFrame(collect_progress())
+progress.to_csv(REPORT_ROOT / 'per_seed_validation.csv', index=False)
+completed = progress[progress.complete.astype(bool)].copy()
+if not completed.empty:
+    metric_columns = ['macro_f1', 'accuracy', 'balanced_accuracy_observed_classes',
+                      'macro_auroc_defined_classes', 'ece_10_bins', 'brier_multiclass']
+    mean_std = completed.groupby('experiment')[metric_columns].agg(['mean', 'std', 'count'])
+    mean_std.to_csv(REPORT_ROOT / 'validation_mean_std.csv')
+    display(mean_std)
+
+final_rows = completed[completed.experiment.isin(EXPERIMENTS)]
+exports = []
+for row in final_rows.to_dict('records'):
+    if row['experiment'].startswith('teacher_'):
+        continue
+    folder = RUNS_ROOT / row['experiment'] / f"seed_{row['seed']}"
+    destination = RUNS_ROOT / 'exports' / row['experiment'] / f"seed_{row['seed']}" / 'student.pt'
+    artifact = export_student(folder, destination)
+    exports.append({'experiment': row['experiment'], 'seed': row['seed'],
+        'validation_macro_f1': row['best_validation_macro_f1'], 'path': str(artifact),
+        'sha256': file_hash(artifact)})
+write_json(REPORT_ROOT / 'student_exports.json', exports)
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+for row in final_rows.to_dict('records'):
+    history_path = RUNS_ROOT / row['experiment'] / f"seed_{row['seed']}" / 'history.json'
+    history = pd.DataFrame(read_json(history_path))
+    label = f"{row['experiment']} / {row['seed']}"
+    axes[0].plot(history.epoch, history.train_ce, label=label)
+    axes[1].plot(history.epoch, history.train_kd, label=label)
+    axes[2].plot(history.epoch, history.validation_macro_f1, label=label)
+for ax, title in zip(axes, ['Train CE', 'Train KD (weighted)', 'Validation macro-F1']):
+    ax.set(xlabel='Epoch', title=title)
+if not final_rows.empty:
+    axes[2].legend(fontsize=8)
+plt.tight_layout()
+plt.savefig(REPORT_ROOT / 'learning_curves.png', dpi=160)
+plt.show()
+status = read_json(REPORT_ROOT / 'suite_status.json')
+print('TRAINING COMPLETE' if status['complete'] else 'TRAINING INCOMPLETE — xem run_progress.csv rồi resume')
+print('Báo cáo:', REPORT_ROOT)
+print('Student:', RUNS_ROOT / 'exports')
+print('Notebook 03 dùng cùng RUN_NAME:', RUN_NAME)
+'''), md('''
+## Lưu và tiếp tục
+
+Save Version kèm **Output**, giữ Private. Khi hết phiên, gắn output đó vào notebook 02 và Run All lại;
+notebook chỉ tự khôi phục suite cùng RUN_NAME, code, config và release. Nếu có nhiều output phù hợp, đặt
+`PREVIOUS_RUNS_OVERRIDE` ở cell cấu hình. Resume ở epoch đã lưu, không ở minibatch đang dang dở.
+
+Mặc định 9 lượt cho mô hình đề xuất. Muốn mở rộng nghiên cứu có thể đổi `EXPERIMENTS` thành
+`['kd_clinical', 'kd_full', 'kd_equal', 'kd_selective', 'kd_higher_h', 'kd_feature', 'kd_relation']`;
+Teachers cần thiết được thêm tự động. Baselines ảnh chỉ chạy khi bạn chủ động thêm tên vào danh sách.
+Release `experimental` và các pending reviews vẫn được ghi trong báo cáo; train xong không tự chuyển thành
+release reviewed hoặc chứng nhận kết quả khóa luận. MeMoSA chưa nằm trong phạm vi notebook này.
 ''')]
 
 evaluation = [md('''
@@ -289,13 +489,20 @@ phân tích lỗi theo hỗ trợ từng lớp, chốt kết luận dựa trên 
 không áp classifier 6 lớp COde để tuyên bố external validation.
 ''')]
 
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--only', choices=['train', 'evaluation'])
+args = parser.parse_args()
 for name, cells in [('COde_02_Train_Baselines.ipynb', train), ('COde_03_Evaluate.ipynb', evaluation)]:
-    cells.insert(1, md('''## Thiết lập offline trước khi import thư viện
+    if args.only and (args.only == 'train') != name.startswith('COde_02'):
+        continue
+    if name.startswith('COde_03'):
+        cells.insert(1, md('''## Thiết lập offline trước khi import thư viện
 
 Trên Kaggle, gắn bundle tạo bởi notebook **00**. Cell sau cài bằng `--no-index`, kiểm tra phiên bản và dùng weights local.
 Nếu đang chủ động chạy phiên online chưa có bundle, đặt `OFFLINE_MODE=False`; chế độ GPU cuộc thi dùng True.
 '''))
-    cells.insert(2, code(offline_setup.BOOTSTRAP_CELL))
+        cells.insert(2, code(offline_setup.BOOTSTRAP_CELL))
     nb = nbf.v4.new_notebook(cells=cells, metadata={
         'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
         'language_info': {'name': 'python'}})
