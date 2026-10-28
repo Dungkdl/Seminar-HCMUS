@@ -1,5 +1,11 @@
 ﻿# ClinDistill — bắt đầu từ đây
 
+Nếu bundle cũ lỗi `Index put requires the source and destination dtypes match` khi chạy
+AMP tại `models.py`, dùng `_support/recover_amp_bundle.py` từ source mới:
+`recover_and_smoke(BUNDLE, MINI_ROOT)`. Helper sửa source, build lại project wheel,
+cập nhật checksum và chạy smoke ở thư mục mới trước khi tạo ZIP; giữ weights đã tải.
+Chạy trong phiên chuẩn bị còn hoạt động và có quyền ghi bundle dưới `/kaggle/working`.
+
 Bộ code hiện hỗ trợ **COde: chuẩn bị → baselines → Teachers → KD → so sánh → xuất Student dùng ảnh**.
 Luồng nghiên cứu giữ **01 → 02 → 03**; thêm **00 dùng một lần để chuẩn bị offline theo hướng dẫn của thầy**.
 Dữ liệu dùng chung nằm trong `../Data/`; source và hướng dẫn nằm trong `Khóa luận/`.

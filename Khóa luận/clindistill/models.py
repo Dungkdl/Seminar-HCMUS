@@ -57,8 +57,10 @@ class VisualBagClassifier(nn.Module):
             raise ValueError('Every bag must contain a valid image.')
         # Padding never reaches the visual encoder or its BatchNorm.
         valid_features = self.projection(self.encoder(images[mask]))
+        # Embeddings can promote autocast features to float32; allocate after the addition.
+        valid_features = valid_features + self.modality_embedding(modalities[mask])
         features = valid_features.new_zeros((*mask.shape, valid_features.shape[-1]))
-        features[mask] = valid_features + self.modality_embedding(modalities[mask])
+        features[mask] = valid_features
         if self.pooling == 'set':
             for block in self.set_blocks:
                 features = block(features, mask)

@@ -1,9 +1,11 @@
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
 import zipfile
+from unittest.mock import patch
 
 from test_training_pipeline import synthetic_release
 from test_clinical_distillation import contexts
@@ -12,8 +14,50 @@ spec = importlib.util.spec_from_file_location('offline', Path(__file__).resolve(
 offline = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(offline)
 
+repair_spec = importlib.util.spec_from_file_location('recovery', Path(__file__).resolve().parents[1] / 'recover_amp_bundle.py')
+recovery = importlib.util.module_from_spec(repair_spec)
+repair_spec.loader.exec_module(recovery)
+
 
 class OfflineTests(unittest.TestCase):
+    def test_amp_repair_keeps_assets_and_updates_source_wheel_and_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            bundle = root / 'bundle'
+            source = bundle / 'source'
+            source.mkdir(parents=True)
+            project = Path(__file__).resolve().parents[2]
+            shutil.copy2(project / 'pyproject.toml', source / 'pyproject.toml')
+            shutil.copytree(project / 'clindistill', source / 'clindistill',
+                ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+            (source / '_support').mkdir()
+            shutil.copy2(project / '_support/kaggle_offline.py', source / '_support/kaggle_offline.py')
+            model = source / 'clindistill/models.py'
+            model.write_text(model.read_text(encoding='utf-8').replace(recovery.NEW, recovery.OLD), encoding='utf-8')
+            wheel = offline.build_project_wheel(source, bundle / 'wheels', root / 'initial_build')
+            for name in ('requirements.txt', 'base_constraints.txt', 'models/resnet50-default.pth',
+                         'models/biomedbert/config.json'):
+                path = bundle / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b'unchanged fixture asset')
+            manifest = bundle / 'offline_manifest.json'
+            offline.write_json(manifest, {'schema_version': 1, 'status': 'assets_prepared_smoke_pending',
+                'checksums': {p.relative_to(bundle).as_posix(): offline.digest(p)
+                    for p in bundle.rglob('*') if p.is_file()}})
+            originals = [p.read_bytes() for p in (model, wheel, manifest)]
+            with patch('subprocess.run', side_effect=RuntimeError('simulated build failure')):
+                with self.assertRaisesRegex(RuntimeError, 'simulated build failure'):
+                    recovery.repair_bundle(bundle)
+            self.assertEqual(originals, [p.read_bytes() for p in (model, wheel, manifest)])
+            helper, repaired = recovery.repair_bundle(bundle)
+            self.assertTrue(repaired)
+            self.assertIn(recovery.NEW, model.read_text(encoding='utf-8'))
+            with zipfile.ZipFile(wheel) as archive:
+                self.assertEqual(archive.read('clindistill/models.py'), model.read_bytes())
+            self.assertEqual((bundle / 'models/resnet50-default.pth').read_bytes(), b'unchanged fixture asset')
+            self.assertEqual(helper.verify_bundle(bundle)['status'], 'assets_prepared_smoke_pending')
+            self.assertFalse(recovery.repair_bundle(bundle)[1])
+
     def test_subset_copies_real_bags_and_never_requires_test(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

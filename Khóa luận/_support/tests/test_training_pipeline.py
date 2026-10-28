@@ -79,6 +79,28 @@ class TrainingTests(unittest.TestCase):
             b = model(images.flip(1), mask.flip(1), modalities.flip(1))['logits']
         torch.testing.assert_close(a, b)
 
+    def test_autocast_with_mixed_modalities_keeps_gradients_and_masks_padding(self):
+        images = torch.randn(2, 3, 3, 32, 32)
+        mask = torch.tensor([[True, False, False], [True, True, False]])
+        modalities = torch.tensor([[0, 0, 0], [0, 1, 0]])
+        devices = [('cpu', torch.bfloat16)]
+        if torch.cuda.is_available():
+            devices.append(('cuda', torch.float16))
+        for device, dtype in devices:
+            for experiment in ('photo_mean', 'photo_attention', 'photo_set_attention'):
+                with self.subTest(device=device, experiment=experiment):
+                    model = VisualBagClassifier(replace(self.config(), experiment=experiment)).to(device)
+                    with torch.autocast(device_type=device, dtype=dtype):
+                        output = model(images.to(device), mask.to(device), modalities.to(device))
+                        loss = torch.nn.functional.cross_entropy(output['logits'], torch.tensor([0, 1], device=device))
+                    self.assertTrue(torch.isfinite(output['logits']).all())
+                    self.assertTrue((output['attention'][~mask.to(device)] == 0).all())
+                    loss.backward()
+                    for parameter in (model.projection[0].weight, model.modality_embedding.weight):
+                        self.assertIsNotNone(parameter.grad)
+                        self.assertTrue(torch.isfinite(parameter.grad).all())
+                        self.assertGreater(parameter.grad.abs().sum().item(), 0)
+
     def test_dataset_is_deterministic_and_split_group_overlap_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             image_root, _, records = synthetic_release(Path(d))

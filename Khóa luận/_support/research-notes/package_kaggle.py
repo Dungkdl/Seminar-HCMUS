@@ -9,7 +9,7 @@ root = Path(__file__).resolve().parents[2]
 destination = root / '_support' / 'dist'
 destination.mkdir(exist_ok=True)
 files = [root / 'README.md', root / 'pyproject.toml']
-files += [root / '_support/kaggle_offline.py']
+files += [root / '_support/kaggle_offline.py', root / '_support/recover_amp_bundle.py']
 files += sorted((root / '_support/dist/project_wheel').glob('*.whl'))
 files += [root / '_support' / 'TECHNICAL_GUIDE.md',
           root / '_support' / 'research-notes' / 'KE_HOACH_KHOA_LUAN.md']
