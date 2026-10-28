@@ -52,7 +52,7 @@ class TrainConfig:
             raise ValueError('Representation KD ablations currently require the full multimodal teacher.')
         if self.experiment == 'photo_set_attention' and self.feature_dim % 4:
             raise ValueError('Set attention requires feature_dim divisible by four heads.')
-        if self.backbone not in {'resnet18', 'resnet50', 'tiny_debug'}:
+        if self.backbone not in {'resnet18', 'resnet50', 'swin_b', 'tiny_debug'}:
             raise ValueError('Unsupported backbone.')
         if min(self.image_size, self.max_photos, self.max_radiographs, self.feature_dim,
                self.batch_size, self.epochs, self.patience) <= 0:

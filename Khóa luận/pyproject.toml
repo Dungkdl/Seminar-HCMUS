@@ -4,13 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clindistill-code"
-version = "0.2.0"
-description = "COde privileged clinical distillation, reproducible multi-image training and evaluation"
+version = "0.4.0"
+description = "COde DINOv3 frozen MIL and group-OOF clinical knowledge distillation"
 requires-python = ">=3.10"
 dependencies = ["numpy", "pandas", "Pillow", "matplotlib", "scikit-learn", "torch>=2.3", "torchvision>=0.18"]
 
 [project.optional-dependencies]
-clinical = ["transformers>=4.40,<6", "huggingface-hub>=0.23,<2", "safetensors>=0.4"]
+clinical = ["transformers>=4.57.1,<6", "huggingface-hub>=0.34,<2", "safetensors>=0.4", "sentencepiece>=0.2"]
+dev = ["nbformat>=5.9", "wheel>=0.43"]
 
 [tool.setuptools.packages.find]
 include = ["clindistill*"]

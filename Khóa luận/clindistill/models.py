@@ -18,8 +18,11 @@ class VisualBagClassifier(nn.Module):
                                          nn.AdaptiveAvgPool2d(1), nn.Flatten())
             width = 32
         else:
-            builder, enum = ((models.resnet18, models.ResNet18_Weights) if config.backbone == 'resnet18'
-                             else (models.resnet50, models.ResNet50_Weights))
+            builder, enum, head_name = {
+                'resnet18': (models.resnet18, models.ResNet18_Weights, 'fc'),
+                'resnet50': (models.resnet50, models.ResNet50_Weights, 'fc'),
+                'swin_b': (models.swin_b, models.Swin_B_Weights, 'head'),
+            }[config.backbone]
             weights = enum.DEFAULT if config.pretrained and load_pretrained and not config.backbone_weights_path else None
             try:
                 self.encoder = builder(weights=weights)
@@ -29,8 +32,8 @@ class VisualBagClassifier(nn.Module):
             if config.backbone_weights_path and load_pretrained:
                 state = torch.load(Path(config.backbone_weights_path), map_location='cpu', weights_only=True)
                 self.encoder.load_state_dict(state, strict=True)
-            width = self.encoder.fc.in_features
-            self.encoder.fc = nn.Identity()
+            width = getattr(self.encoder, head_name).in_features
+            setattr(self.encoder, head_name, nn.Identity())
         if self.freeze_backbone:
             self.encoder.requires_grad_(False)
         self.projection = nn.Sequential(nn.Linear(width, config.feature_dim), nn.ReLU())

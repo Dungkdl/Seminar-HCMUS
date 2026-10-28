@@ -31,7 +31,7 @@ def write_json(path, obj):
 
 def code_hash():
     root = Path(__file__).parent
-    return object_hash({p.name: file_hash(p) for p in sorted(root.glob('*.py'))})
+    return object_hash({p.relative_to(root).as_posix(): file_hash(p) for p in sorted(root.rglob('*.py'))})
 
 
 def publish_release(audit_dir, destination):

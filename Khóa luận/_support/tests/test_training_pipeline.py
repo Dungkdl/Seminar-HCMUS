@@ -69,6 +69,25 @@ class TrainingTests(unittest.TestCase):
         torch.testing.assert_close(expected, permuted['logits'])
         self.assertTrue((result['attention'][~mask] == 0).all())
 
+    def test_swin_backbone_pools_bags_and_preserves_projection_gradients(self):
+        # Real torchvision Swin-B, small test images and random weights; no downloads.
+        config = replace(self.config(), backbone='swin_b', freeze_backbone=True)
+        model = VisualBagClassifier(config).train()
+        self.assertEqual(model.projection[0].in_features, 1024)
+        self.assertIsInstance(model.encoder.head, torch.nn.Identity)
+        self.assertFalse(model.encoder.training)
+        images = torch.randn(1, 3, 3, 32, 32)
+        mask = torch.tensor([[True, True, False]])
+        modalities = torch.tensor([[0, 1, 0]])
+        with torch.autocast('cpu', dtype=torch.bfloat16):
+            output = model(images, mask, modalities)
+            loss = output['logits'].float().square().sum()
+        self.assertEqual(tuple(output['logits'].shape), (1, 6))
+        self.assertEqual(output['attention'][0, 2].item(), 0)
+        loss.backward()
+        self.assertGreater(model.projection[0].weight.grad.abs().sum().item(), 0)
+        self.assertTrue(all(p.grad is None for p in model.encoder.parameters()))
+
     def test_set_pooling_respects_padding_and_permutation(self):
         model = VisualBagClassifier(replace(self.config(), experiment='photo_set_attention')).eval()
         images = torch.randn(2, 3, 3, 32, 32)

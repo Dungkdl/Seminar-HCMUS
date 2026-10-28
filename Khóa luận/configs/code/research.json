@@ -1,0 +1,47 @@
+{
+  "run_name": "code_research_v1",
+  "seeds": [
+    2026,
+    2027,
+    2028
+  ],
+  "folds": 5,
+  "epochs": 30,
+  "patience": 8,
+  "batch_size": 32,
+  "accumulation_steps": 1,
+  "feature_dim": 256,
+  "dropout": 0.2,
+  "learning_rate": 0.001,
+  "weight_decay": 0.0001,
+  "max_photos": 8,
+  "temperature": 4.0,
+  "kd_weight": 1.0,
+  "gate_temperature": 1.0,
+  "visual_support_epsilon": 0.1,
+  "feature_kd_weight": 0.1,
+  "methods": [
+    "resnet50_mil",
+    "swin_b_mil",
+    "student_no_kd",
+    "kd_visual",
+    "kd_multimodal",
+    "kd_confidence",
+    "kd_reliability"
+  ],
+  "bootstrap_repetitions": 1000,
+  "debug": false,
+  "encoder_training": "frozen_features",
+  "clinical_fields": [
+    "age",
+    "gender",
+    "chief_complaint"
+  ],
+  "language": "en",
+  "clinical_temporal_verified": false,
+  "image_size": 224,
+  "image_batch_size": 8,
+  "student_model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
+  "teacher_model": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+  "clinical_model": "BAAI/bge-m3"
+}
