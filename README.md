@@ -7,8 +7,8 @@ Pipeline nghiên cứu phân loại ảnh nha khoa, sử dụng thông tin lâm 
 | Notebook | Vai trò |
 |---|---|
 | [00 — Offline setup](Khóa%20luận/COde_00_Kaggle_Offline_Setup.ipynb) | Chuẩn bị wheels và pretrained weights khi còn Internet |
-| [01 — Data preparation](Khóa%20luận/COde_01_Data_Audit_and_Preparation.ipynb) | Làm sạch, EDA, kiểm định, chia tập và clinical embeddings |
-| [02 — Train](Khóa%20luận/COde_02_Train_Baselines.ipynb) | Teacher V/H, selective KD với 3 seed, resume và xuất Student |
+| [01 — Data preparation](Khóa%20luận/COde_01_Data_Audit_and_Preparation.ipynb) | Làm sạch, EDA, kiểm định, chia tập và frozen DINO/BGE features |
+| [02 — Train](Khóa%20luận/COde_02_Train_Baselines.ipynb) | DINOv3 Teachers, group-OOF, reliability KD, 3 seeds và Student chỉ ảnh |
 | [03 — Evaluate](Khóa%20luận/COde_03_Evaluate.ipynb) | Metrics, so sánh thực nghiệm và xuất Student |
 
 ## Các tài liệu và code bổ sung
@@ -34,10 +34,12 @@ Trong môi trường có dependencies khoa học/PyTorch tương thích:
 
 ```bash
 cd "Khóa luận"
-python -m pip install -e ".[clinical]"
+python -m pip install -e ".[clinical,dev]"
 python -m unittest discover -s _support/tests -p "test_*.py"
 ```
 
 Lệnh cài trên dùng cho môi trường có Internet. Với GPU chặn Internet, thực hiện notebook 00 theo hướng dẫn chi tiết; giữ cặp torch/torchvision của môi trường đích.
 
 Tests dùng dữ liệu tổng hợp. Smoke tại local chỉ xác nhận pipeline; chưa phải kết quả train đầy đủ trên RTX 6000/Kaggle và chưa chứng minh hiệu quả nghiên cứu.
+
+Bản research v4 thực hiện Stage 1 frozen DINOv3-B/L + BGE-M3, gated MIL/fusion và group-OOF KD. Xem [plan](CODe_Research_Implementation_Plan.md). Chưa có full COde DINO results hoặc Stage 2/3 encoder fine-tuning. Bundle/cache BiomedBERT cũ không thay cho bank/features mới.
