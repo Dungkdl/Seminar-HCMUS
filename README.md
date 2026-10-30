@@ -15,14 +15,15 @@ Pipeline nghiên cứu phân loại ảnh nha khoa, sử dụng thông tin lâm 
 
 - `Paper/`: các paper tham khảo, literature review và báo cáo seminar đã có tại máy làm việc. Quyền tác giả thuộc các tác giả/nhà xuất bản tương ứng.
 - `Baseline/Seminar/`: notebook và script baseline ban đầu; `COde_HF/` chỉ gồm README, thông tin Git và Data Usage Agreement, không có dataset.
+- [Baseline/Qwen2.5-VL/](Baseline/Qwen2.5-VL/README.md): 7 notebook tái lập Qwen 3B/7B có log thực thi và bảng Excel so sánh. Xem README của thư mục để biết thứ tự chạy và giới hạn của kết quả.
 - `Seminar.png`: hình seminar.
 - `explore-data.ipynb`, `run-all-2.ipynb`: các notebook ban đầu, giữ để tham khảo. Pipeline hiện tại bắt đầu từ notebook 00–03 trong `Khóa luận/`.
 
-Các notebook được xóa output trước khi đưa lên Git. Notebook baseline đọc token Hugging Face từ biến môi trường `HF_TOKEN` thay cho token ghi trực tiếp; cung cấp biến này khi thực sự cần xác thực.
+Các notebook nghiên cứu được xóa output trước khi đưa lên Git. Riêng `Baseline/Qwen2.5-VL/` giữ output của các lần chạy đã cung cấp để đối chiếu kết quả và [Issue #1](https://github.com/Dungkdl/Seminar-HCMUS/issues/1); điểm số trong log chưa được chấm lại sau review. Notebook baseline đọc token Hugging Face từ biến môi trường `HF_TOKEN` thay cho token ghi trực tiếp; cung cấp biến này khi thực sự cần xác thực.
 
 ## Dữ liệu và artifact
 
-Repo lưu mã nguồn, notebook không có output, cấu hình, tests và tài liệu kỹ thuật. COde, bản mini, clinical embeddings, weights, checkpoints và các ZIP upload Kaggle không nằm trong Git. Các đường dẫn artifact trong hướng dẫn chi tiết trỏ tới file được tạo tại máy làm việc, không phải file có sẵn sau khi clone.
+Repo lưu mã nguồn, notebook nghiên cứu không có output, log notebook tái lập Qwen, cấu hình, tests và tài liệu kỹ thuật. COde, bản mini, clinical embeddings, weights, checkpoints và các ZIP upload Kaggle không nằm trong Git. Các đường dẫn artifact trong hướng dẫn chi tiết trỏ tới file được tạo tại máy làm việc, không phải file có sẵn sau khi clone.
 
 Đặt dữ liệu có quyền sử dụng tại `Data/COde-Dataset (1)/` cạnh thư mục `Khóa luận/`, gồm `complete_dataset.csv` và `Images/`, hoặc dùng biến đường dẫn override trong notebook. Notebook 01 tạo prepared release. Giữ dữ liệu trên Kaggle trong phạm vi truy cập phù hợp dữ liệu gốc.
 
