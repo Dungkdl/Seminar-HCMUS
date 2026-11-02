@@ -1,6 +1,17 @@
 # Kiểm chứng implementation v5 — 02/11/2026
 
-## Phần mềm
+## Bổ sung package 0.5.1: assets Qwen và cấu hình GPU
+
+- **48 tests qua** với Python 3.14.2, torch 2.11.0+cu128, Transformers 4.57.1, huggingface-hub 0.36.2. Năm notebook qua nbformat/AST, không có execution outputs.
+- Kiểm tra ánh xạ `data/images` bằng SHA256 ảnh gốc, từ chối thiếu hash/khác bytes/trùng basename/path traversal. Tiny encoders tạo cùng features từ ảnh gốc và ảnh làm phẳng.
+- Kiểm tra multiprocessing loader qua nhiều chunk/resume, chia microbatch khi CUDA OOM giả lập, giữ thứ tự và nhớ batch nhỏ cho lần sau; không nuốt lỗi runtime khác.
+- Kiểm tra resident batches (thực thi trên CPU) khớp ordinary DataLoader cả visit order, padding, clinical shuffle và target indices. Test này chưa đo CUDA throughput.
+- Kiểm tra đóng gói addon: source/wheel + prepared metadata/hash index; không chứa ảnh/weights/Qwen assets. Bank vẫn kiểm tra installed wheel khớp source.
+- Profile ≥70 GiB VRAM trống khởi đầu DINO-B/ResNet 256, DINO-L/Swin 128, clinical 128; tối đa 8 image workers. Optimizer batch32/accumulation1, head FP32 và protocol/split giữ nguyên.
+
+Chưa benchmark Pro 6000/Kaggle hoặc xác nhận full pretrained CODe experiments. Batch profile là điểm khởi đầu; log images/s và peak GPU memory dùng để đo trên máy đích. Cache cũ không dùng với builder0.5.1; dùng research_features_v3, giữ code_v1 split. Các review chuyên môn bên dưới vẫn mở.
+
+## Phần mềm bản 0.5.0
 
 - 42 tests qua trong môi trường Python 3.14.2 / torch 2.11.0+cu128 / torchvision 0.26.0+cu128.
 - Chạy lại toàn bộ 42 tests trong virtualenv dùng đúng Transformers **4.57.1**, huggingface-hub **0.36.2**; đều qua.

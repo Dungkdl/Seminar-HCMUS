@@ -1,4 +1,4 @@
-# Kỹ thuật COde research v5 (package 0.5.0)
+# Kỹ thuật COde research v5 (package 0.5.1)
 
 Tài liệu giải thích code hiện có trong `clindistill/research`, cấu hình `configs/code/research.json`.
 Đây là implementation **Stage 1** của plan; không gọi frozen-feature training là full encoder fine-tuning.
@@ -14,7 +14,7 @@ Hướng dẫn thực thi từng phiên và đóng gói wheel ở [KAGGLE_RUNBOO
 - `weight_diagnostics.json` báo mean, zero fraction và effective cases theo lớp/bốn nhóm Teacher. `teacher_strata.json` đánh giá các model theo các nhóm này; không xem disagreement là ground truth visual sufficiency.
 - Báo thêm per-class precision/F1; primary contrasts có MM KD−Visual KD, ablation contrasts được gắn nhãn riêng. Tất cả CI hiện là mô tả, chưa hiệu chỉnh multiplicity.
 - Cache/study/report truyền nguyên trạng pending_reviews và annotation_note. Đăng ký test bằng `freeze_test_protocol` trước khi thêm shard test; hash config/checkpoints/source không được đổi sau đó.
-- Bank schema5 có dependency lock và kiểm tra mọi module của wheel khớp source. Kaggle import từ wheel đã cài, không ưu tiên thư mục source. Bank cũ cần tạo lại, cache builder mới dùng research_features_v2 trên cùng prepared split.
+- Bank schema5 có dependency lock và kiểm tra mọi module của wheel khớp source. Kaggle import từ wheel đã cài, không ưu tiên thư mục source. Bank cũ cần tạo lại, cache builder mới dùng research_features_v3 trên cùng prepared split.
 - Chưa có full pretrained CODe run hay expert review mới. Các thay đổi này tạo công cụ kiểm nghiệm giả thuyết, không tự chứng minh công thức reliability tốt hơn.
 
 ## 1. Bài toán và split

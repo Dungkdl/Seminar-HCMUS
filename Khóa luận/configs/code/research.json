@@ -1,5 +1,5 @@
 {
-  "run_name": "code_research_v2",
+  "run_name": "code_research_v3",
   "seeds": [
     2026,
     2027,
@@ -43,9 +43,13 @@
   "language": "en",
   "clinical_temporal_verified": false,
   "image_size": 224,
-  "image_batch_size": 8,
+  "image_batch_size": "auto",
   "student_model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
   "teacher_model": "facebook/dinov3-vitl16-pretrain-lvd1689m",
   "clinical_model": "BAAI/bge-m3",
-  "label_smoothing": 0.1
+  "label_smoothing": 0.1,
+  "image_workers": "auto",
+  "clinical_batch_size": "auto",
+  "evaluation_batch_size": 256,
+  "resident_features": true
 }

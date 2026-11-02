@@ -59,7 +59,7 @@ class TrainingNotebookTests(unittest.TestCase):
             self.assertEqual(len(read_json(study/'completed.json')['results']),2+len(config()['methods']))
             self.assertFalse(read_json(study/'completed.json')['test_opened'])
             self.assertTrue((study/'learning_curves.png').is_file())
-            self.assertTrue((root/'output/student_export/code_research_v2/student_manifest.json').is_file())
+            self.assertTrue((root/'output/student_export'/config()['run_name']/'student_manifest.json').is_file())
             hashes={p.relative_to(study):file_hash(p) for p in study.rglob('*.pt')}
             self.execute(root,cache)
             self.assertEqual(hashes,{p.relative_to(study):file_hash(p) for p in study.rglob('*.pt')})
@@ -67,7 +67,7 @@ class TrainingNotebookTests(unittest.TestCase):
             self.assertEqual(saved.parent.resolve(),root.resolve())
             self.assertEqual(study.parents[1].resolve(),(root/'output').resolve())
             (root/'output').rename(saved)
-            restored=self.execute(root,cache,previous=saved/'runs/code_research_v2')['STUDY_ROOT']
+            restored=self.execute(root,cache,previous=saved/'runs'/config()['run_name'])['STUDY_ROOT']
             self.assertEqual(hashes,{p.relative_to(restored):file_hash(p) for p in restored.rglob('*.pt')})
 
     def test_corrupt_cache_fails_before_training(self):

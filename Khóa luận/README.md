@@ -1,4 +1,4 @@
-# ClinDistill trên CODe — research v5 / package 0.5.0
+# ClinDistill trên CODe — research v5 / package 0.5.1
 
 **Bắt đầu bằng [hướng dẫn Kaggle từng bước với wheel offline](_support/KAGGLE_RUNBOOK.md).**
 
@@ -7,7 +7,8 @@ Luồng chạy: tạo source ZIP/project wheel trên máy → notebook00 online 
 | Notebook | Input chính | Công việc |
 |---|---|---|
 | [00 — Offline setup](COde_00_Kaggle_Offline_Setup.ipynb) | Source mới, Internet, HF_TOKEN có quyền DINO | Bank v5 với dependency lock, project wheel, DINO-B/L, BGE-M3, ResNet/Swin và checksum. Không cần prepared release trong lần đầu. |
-| [01 — Data audit/preparation](COde_01_Data_Audit_and_Preparation.ipynb) | Bank00 + CODe CSV/Images gốc | Patient/duplicate-group split, review artifacts, code_v1 và research_features_v2. Có prepared release thì chỉ chạy setup + mục15. |
+| [01 — Data audit/preparation](COde_01_Data_Audit_and_Preparation.ipynb) | Bank00 + CODe CSV/Images gốc | Patient/duplicate-group split, review artifacts, code_v1 và research_features_v3. Có prepared release thì chỉ chạy setup + mục15. |
+| [01 — Features only](COde_01_Features_Only.ipynb) | Bank00 + prepared metadata/image_index + ảnh gốc hoặc Qwen data/images | Trích features với auto batch/parallel workers; Run All không chạy lại audit. |
 | [02 — Train](COde_02_Train_Baselines.ipynb) | Bank00 + cache01 | Teachers, group-OOF targets, Students/đối chứng, resume và export image-only Student. Không mở test. |
 | [03 — Evaluate](COde_03_Evaluate.ipynb) | Bank/cache/study hoàn thành | Mean/std, per-class, calibration, paired comparisons, Teacher-disagreement strata và khóa protocol trước test. |
 
@@ -20,9 +21,11 @@ py -3.14 -m pip install "setuptools>=68" "wheel>=0.43"
 py -3.14 "Khóa luận/_support/research-notes/package_kaggle.py"
 ```
 
-Output ở `_support/dist/`: `clindistill-code-source.zip`, `project_wheel/clindistill_code-0.5.0-py3-none-any.whl`, `package_manifest.json`. Không gồm raw images hay pretrained weights. Third-party binary wheels được notebook00 chuẩn bị trên Linux có cùng Python/base environment với phiên đích.
+Output ở `_support/dist/`: `clindistill-code-source.zip`, `project_wheel/clindistill_code-0.5.1-py3-none-any.whl`, `package_manifest.json`. Không gồm raw images hay pretrained weights. Third-party binary wheels được notebook00 chuẩn bị trên Linux có cùng Python/base environment với phiên đích.
 
 Nếu cần đóng gói prepared release riêng, thêm `--prepared-root "đường-dẫn-code_v1"`. Không thay dữ liệu gốc. Save Version và gắn Notebook Output giữa các phiên Kaggle; không bắt buộc download/upload lại bank hoặc cache lớn.
+
+Để dùng `code_full_offline_assets/data/images` đang có, thêm `--image-root "E:/Hoc Tap/Data/COde-Dataset"` cùng `--prepared-root`. Gói `clindistill-assets-addon.zip` bổ sung source/metadata và hash ảnh gốc; không thay Qwen/wheelhouse cũ. Xem cây thư mục và cấu hình GPU Pro 6000 ở đầu runbook. CLI cũng xuất 5 notebook vào `_support/dist/notebooks/` để import trực tiếp.
 
 ## Các profile thí nghiệm
 
@@ -37,7 +40,7 @@ Photo-only, một lượt khám là một mẫu có nhiều ảnh; sáu target �
 
 Clinical mặc định chỉ English age/gender/chief complaint đã sàng lọc. Chưa review thời điểm thì giữ `screened_exploratory`; không tự chứng nhận clinical có trước chẩn đoán. Pending reviews về nhãn/near-duplicate/clinical được giữ trong artifacts và report.
 
-Bank v5/project0.5.0 cần được chuẩn bị mới. Giữ `code_v1` split nếu đã có; tạo cache v2 vì builder thay đổi. Không trộn weights/cache/checkpoints v2/v3/v4 với nghiên cứu mới.
+Bank v5/project0.5.1 cần được chuẩn bị mới. Giữ `code_v1` split nếu đã có; tạo cache v3 vì builder thay đổi. Không trộn weights/cache/checkpoints v2/v3/v4 với nghiên cứu mới.
 
 Kiểm thử dùng synthetic features và tiny encoders để kiểm tra phần mềm. Chưa có kết quả full pretrained CODe/Kaggle được chứng minh bởi lần sửa này. Việc thêm đối chứng và báo cáo không bảo đảm reliability KD sẽ thắng, không xác nhận visual sufficiency hay độ an toàn lâm sàng.
 

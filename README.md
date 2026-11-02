@@ -43,4 +43,4 @@ Lệnh cài trên dùng cho môi trường có Internet. Với GPU chặn Intern
 
 Tests dùng dữ liệu tổng hợp. Smoke tại local chỉ xác nhận pipeline; chưa phải kết quả train đầy đủ trên RTX 6000/Kaggle và chưa chứng minh hiệu quả nghiên cứu.
 
-Bản research v5 (package 0.5.0) thực hiện Stage 1 frozen DINOv3-B/L + BGE-M3, gated MIL/fusion và group-OOF KD, có đối chứng thành phần KD và clinical/MIL. Xem [hướng dẫn wheel offline trên Kaggle](Khóa%20luận/_support/KAGGLE_RUNBOOK.md) và [plan](CODe_Research_Implementation_Plan.md). Chưa có full COde DINO results hoặc Stage 2/3 encoder fine-tuning. Bank v5/cache v2 cần được tạo bằng source mới; giữ nguyên prepared split nếu đã có.
+Bản research v5 (package 0.5.1) thực hiện Stage 1 frozen DINOv3-B/L + BGE-M3, gated MIL/fusion và group-OOF KD, có đối chứng thành phần KD và clinical/MIL. Xem [hướng dẫn wheel offline trên Kaggle](Khóa%20luận/_support/KAGGLE_RUNBOOK.md) và [plan](CODe_Research_Implementation_Plan.md). Chưa có full COde DINO results hoặc Stage 2/3 encoder fine-tuning. Bank v5/source0.5.1/cache v3 cần được tạo bằng source mới; giữ nguyên prepared split nếu đã có.

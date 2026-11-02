@@ -264,8 +264,9 @@ def research_find(predicate, *, include_runs=False):
             here = Path(current)
             if predicate(here, dirs, files):
                 found.add(here.resolve())
-            excluded = {'Images', '.git', '.cache', '__pycache__', '_archive', '_support',
-                        'models', 'wheels', '_chunks', 'student_export'}
+            excluded = {'Images', 'images', '.git', '.cache', '__pycache__', '_archive', '_support',
+                        'models', 'wheels', 'wheelhouse', 'official_code', '_chunks', 'student_export'}
+            dirs[:] = [d for d in dirs if not d.lower().startswith('qwen')]
             if not include_runs:
                 excluded.add('runs')
             dirs[:] = [d for d in dirs if d not in excluded]

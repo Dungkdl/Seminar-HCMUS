@@ -46,6 +46,8 @@ def validate_config(config):
     for name in ('folds', 'epochs', 'patience', 'batch_size', 'accumulation_steps', 'feature_dim'):
         if not isinstance(config[name], int) or config[name] < 1:
             raise ValueError(f'{name} must be a positive integer.')
+    if not isinstance(config.get('evaluation_batch_size', 1), int) or config.get('evaluation_batch_size', 1) < 1:
+        raise ValueError('evaluation_batch_size must be a positive integer.')
     if config['folds'] < 2 or config['encoder_training'] != 'frozen_features':
         raise ValueError('Need >=2 group folds and the frozen_features protocol.')
     if not config['seeds'] or len(set(config['seeds'])) != len(config['seeds']):
@@ -105,8 +107,8 @@ def model_spec(store, config, name):
 
 
 def forward_batch(model, batch, device):
-    args = {key: batch[key].to(device) for key in ('clinical', 'demographics', 'clinical_present') if key in batch}
-    return model(batch['visual'].to(device), batch['mask'].to(device), **args)
+    args = {key: batch[key].to(device, non_blocking=True) for key in ('clinical', 'demographics', 'clinical_present') if key in batch}
+    return model(batch['visual'].to(device, non_blocking=True), batch['mask'].to(device, non_blocking=True), **args)
 
 
 def dataset_for(store, split, visual_key, role, name, seed=0, indices=None):
@@ -116,16 +118,58 @@ def dataset_for(store, split, visual_key, role, name, seed=0, indices=None):
                         clinical_mode=mode, shuffle_seed=seed)
 
 
-def loader(dataset, config, *, shuffle=False, epoch=0, seed=0):
-    return DataLoader(dataset, batch_size=config['batch_size'], collate_fn=collate_visits,
-                      shuffle=shuffle, num_workers=0, generator=torch.Generator().manual_seed(seed + epoch))
+class ResidentVisitLoader:
+    """Keep small frozen-feature cohorts on GPU, preserving DataLoader's visit order."""
+    def __init__(self, dataset, batch_size, shuffle, generator, device='cuda'):
+        self.dataset, self.device = dataset, torch.device(device)
+        if not hasattr(dataset, '_resident_batches'):
+            full = collate_visits([dataset[i] for i in range(len(dataset))])
+            # IDs and global indices remain on CPU for audited OOF target lookup.
+            full = {k: v.to(self.device) if torch.is_tensor(v) and k != 'indices' else v for k, v in full.items()}
+            dataset._resident_batches = full
+        self.full = dataset._resident_batches
+        self.order = DataLoader(range(len(dataset)), batch_size=batch_size, shuffle=shuffle,
+                                generator=generator, num_workers=0)
+
+    def __len__(self):
+        return len(self.order)
+
+    def __iter__(self):
+        for offsets in self.order:
+            gpu_offsets = offsets.to(self.device)
+            batch = {k: ([v[i] for i in offsets.tolist()] if k == 'ids' else
+                         v[offsets] if k == 'indices' else v[gpu_offsets]) for k, v in self.full.items()}
+            # The shape follows ordinary collation; padding cannot change the model evidence.
+            width = int(np.diff(self.dataset.values['offsets'])[self.dataset.indices[offsets.numpy()]].max())
+            batch['visual'], batch['mask'] = batch['visual'][:, :width], batch['mask'][:, :width]
+            yield batch
+
+
+def loader(dataset, config, *, shuffle=False, epoch=0, seed=0, evaluation=False, device=None):
+    size = config.get('evaluation_batch_size', config['batch_size']) if evaluation else config['batch_size']
+    generator = torch.Generator().manual_seed(seed + epoch)
+    cuda = device is not None and torch.device(device).type == 'cuda'
+    if cuda and config.get('resident_features', True):
+        data = dataset.values
+        width = data[dataset.key].shape[-1]
+        photos = int(np.diff(data['offsets'])[dataset.indices].max())
+        estimate = len(dataset) * (photos * (width * 4 + 1) + (data['clinical'].shape[-1] + 5) * 4 + 32)
+        free, _ = torch.cuda.mem_get_info()
+        if hasattr(dataset, '_resident_batches') or estimate < min(free * .2, 2 * 2**30):
+            try:
+                return ResidentVisitLoader(dataset, size, shuffle, generator)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                print('Resident feature allocation OOM; using pinned CPU batches.', flush=True)
+    return DataLoader(dataset, batch_size=size, collate_fn=collate_visits, pin_memory=cuda,
+                      shuffle=shuffle, num_workers=0, generator=generator)
 
 
 def predict(model, dataset, config, device):
     model.eval()
     values, ids = [], []
     with torch.inference_mode():
-        for batch in loader(dataset, config):
+        for batch in loader(dataset, config, evaluation=True, device=device):
             values.append(forward_batch(model, batch, device)['logits'].float().cpu().numpy())
             ids.extend(batch['ids'])
     return np.concatenate(values), ids
@@ -194,9 +238,9 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
     classes = store.metadata['class_names']
     for epoch in range(start, epochs):
         tick = time.monotonic(); model.train()
-        batches = loader(training, config, shuffle=True, epoch=epoch, seed=seed)
+        batches = loader(training, config, shuffle=True, epoch=epoch, seed=seed, device=device)
         optimizer.zero_grad(set_to_none=True)
-        total, count, running_kd = 0., 0, 0.
+        total, count, running_kd = torch.zeros((), device=device), 0, torch.zeros((), device=device)
         for step, batch in enumerate(batches):
             out = forward_batch(model, batch, device)
             labels = batch['labels'].to(device)
@@ -232,7 +276,8 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
             if (step + 1) % config['accumulation_steps'] == 0 or step + 1 == len(batches):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5., error_if_nonfinite=True)
                 optimizer.step(); optimizer.zero_grad(set_to_none=True)
-            total += float(loss.detach()) * n; running_kd += float(kd.detach()) * n; count += n
+            total += loss.detach() * n; running_kd += kd.detach() * n; count += n
+        total, running_kd = float(total), float(running_kd)
         scheduler.step()
         metrics = None
         if validation is not None:
@@ -389,6 +434,11 @@ def run_study(feature_root, study_root, config, *, require_gpu=True):
     if (root / 'study.json').exists() and read_json(root / 'study.json')['identity'] != identity:
         raise ValueError('Study inputs/config/source changed. Choose a new run_name; no checkpoint mixing.')
     write_json(root / 'study.json', {'identity': identity, **protocol})
+    from .runtime import hardware
+    write_json(root / 'training_runtime.json', {'hardware': hardware(), 'optimizer_batch': config['batch_size'],
+        'accumulation_steps': config['accumulation_steps'], 'head_precision': 'float32',
+        'resident_features': config.get('resident_features', True),
+        'evaluation_batch_size': config.get('evaluation_batch_size', config['batch_size'])})
     write_json(root / 'cohort_summary.json', {split: {
         'visits': len(data['ids']), 'patients': len(np.unique(data['patients'])),
         'independent_groups': len(np.unique(data['groups'])),

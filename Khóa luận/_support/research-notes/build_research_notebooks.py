@@ -10,7 +10,7 @@ bank = importlib.util.module_from_spec(spec); spec.loader.exec_module(bank)
 
 
 def load(prefix):
-    path = next(ROOT.glob(prefix + '*.ipynb'))
+    path = next(p for p in ROOT.glob(prefix + '*.ipynb') if 'Features_Only' not in p.name)
     return path, json.loads(path.read_text(encoding='utf-8'))
 
 
@@ -49,13 +49,22 @@ def refresh():
         # COde 00 — Research wheel bank v5
 
         Chạy ONLINE trên Linux/Kaggle có cùng Python/scientific stack với phiên GPU đích.
-        Gắn source 0.5.0 đã giải nén. Chưa có prepared release vẫn chạy: RUN_MINI_REHEARSAL=False.
+        Gắn source 0.5.1 đã giải nén. Chưa có prepared release vẫn chạy: RUN_MINI_REHEARSAL=False.
         Bank chứa project wheel, dependency wheelhouse + requirements.lock, source/configs và pretrained weights có checksum.
         Chấp nhận điều khoản DINOv3-B/L, thêm Kaggle Secret HF_TOKEN và cấp quyền cho notebook.
         Hướng dẫn: _support/KAGGLE_RUNBOOK.md. Bank v4 không dùng cho source mới.
     ''')
-    source = ''.join(nb['cells'][1]['source']).replace('code_research_bank_v1', 'code_research_bank_v2')
+    source = ''.join(nb['cells'][1]['source'])
+    source = source.replace('code_research_bank_v1', 'clindistill_research_v3').replace('code_research_bank_v2', 'clindistill_research_v3')
+    source = source.replace("{'Images','.git','.cache','_support','models','wheels','_archive'}",
+        "{'Images','images','.git','.cache','_support','models','wheels','wheelhouse','official_code','_archive'} and not d.lower().startswith('qwen')")
     source = source.replace('RUN_MINI_REHEARSAL = True', 'RUN_MINI_REHEARSAL = False').replace('Source v4', 'Source v5')
+    if 'GPU runtime preflight' not in source:
+        source = source.replace("print(json.dumps(bank.inventory(), indent=2))", """print(json.dumps(bank.inventory(), indent=2))
+# GPU runtime preflight before downloading large assets
+runtime_spec = importlib.util.spec_from_file_location('research_hardware', source / 'clindistill/research/runtime.py')
+runtime = importlib.util.module_from_spec(runtime_spec); runtime_spec.loader.exec_module(runtime)
+print(json.dumps(runtime.hardware(), indent=2))""")
     put(nb, 1, source)
     source = ''.join(nb['cells'][3]['source']).replace("sys.path.insert(0, str(BANK_ROOT / 'source'))", "bank.installed_project_matches(info['project_files'])")
     put(nb, 3, source)
@@ -81,28 +90,64 @@ def refresh():
     if "if not globals().get('RESEARCH_ASSETS')" not in source:
         source = source.replace('sys.path.insert(0, str(project_root))', "if not globals().get('RESEARCH_ASSETS'):\n    sys.path.insert(0, str(project_root))")
     put(nb, 45, source)
-    source = ''.join(nb['cells'][48]['source']).replace('research_features_v1', 'research_features_v2').replace('bank v4', 'bank v5')
-    if 'TEST_PROTOCOL_PATH = ' not in source:
-        source = source.replace("PREPARE_SPLITS = ['train', 'validation']", "TEST_PROTOCOL_PATH = None  # test_protocol.json đã khóa ở notebook03\nPREPARE_SPLITS = ['train', 'validation']")
-    source = source.replace('manifest = prepare_features(prepared, images, models, destination, cfg, splits=PREPARE_SPLITS)',
-        "test_protocol = read_json(TEST_PROTOCOL_PATH) if TEST_PROTOCOL_PATH else None\nmanifest = prepare_features(prepared, images, models, destination, cfg, splits=PREPARE_SPLITS, test_protocol=test_protocol)")
-    put(nb, 48, source)
+    put(nb, 48, '''
+        from clindistill.artifacts import read_json
+        from clindistill.research.data import prepare_features
+        PREPARED_ROOT_OVERRIDE = None
+        IMAGE_ROOT_OVERRIDE = None
+        RESEARCH_FEATURE_OUTPUT_OVERRIDE = None
+        MODEL_LOCATIONS_OVERRIDE = None
+        IMAGE_BATCH_SIZE = 'auto'  # >=70 GiB free: B=256, L=128, ResNet=256, Swin=128
+        IMAGE_WORKERS = 'auto'  # up to 8 CPU workers; CPU software checks use 0
+        CLINICAL_BATCH_SIZE = 'auto'  # 128 on a largely free 96-GB GPU; FP32 text encoder
+        TEST_PROTOCOL_PATH = None
+        PREPARE_SPLITS = ['train', 'validation']
+        prepared = research_one(PREPARED_ROOT_OVERRIDE,
+            [release_root] if 'release_root' in globals() else research_find(lambda p,d,f:
+                'release.json' in f and not read_json(p / 'release.json').get('debug_subset')), 'Prepared release')
+        images = research_one(IMAGE_ROOT_OVERRIDE, research_find(lambda p,d,f:
+            ((p / 'Images/Photographs').is_dir() or ('images' in d and 'cls_train.json' in f))
+            and 'mini_dataset.json' not in f), 'Original CODe or Qwen data/images')
+        models = MODEL_LOCATIONS_OVERRIDE or (RESEARCH_ASSETS['models'] if RESEARCH_ASSETS else None)
+        if models is None:
+            raise RuntimeError('Attach the ClinDistill research bank; Qwen weights are not DINO/BGE assets.')
+        cfg = read_json(PROJECT_ROOT / 'configs/code/research.json')
+        cfg.update(image_batch_size=IMAGE_BATCH_SIZE, image_workers=IMAGE_WORKERS, clinical_batch_size=CLINICAL_BATCH_SIZE)
+        destination = Path(RESEARCH_FEATURE_OUTPUT_OVERRIDE) if RESEARCH_FEATURE_OUTPUT_OVERRIDE else (
+            Path('/kaggle/working/data/COde_processed/research_features_v3') if Path('/kaggle').exists()
+            else PROJECT_ROOT.parent / 'Data/COde_processed/research_features_v3')
+        test_protocol = read_json(TEST_PROTOCOL_PATH) if TEST_PROTOCOL_PATH else None
+        manifest = prepare_features(prepared, images, models, destination, cfg, splits=PREPARE_SPLITS, test_protocol=test_protocol)
+        print('Research cache:', destination, '\\nDimensions:', manifest['dimensions'], '\\nSplits:', manifest['splits'])
+        print('Save Version and attach this Output to notebook02. Runtime: feature_runtime.json')
+    ''')
     put(nb, 47, '''
-        ## 15. Frozen DINOv3 / BGE-M3 features v2
+        ## 15. Frozen DINOv3 / BGE-M3 features v3
 
         Có prepared release thì chạy bootstrap và cell này. Mặc định chỉ train/validation.
         Clinical: English age/gender/chief complaint. Review chưa xác minh vẫn screened_exploratory.
-        Source builder mới cần cache mới research_features_v2; giữ nguyên split code_v1.
+        Source 0.5.1 cần cache mới research_features_v3; giữ nguyên split code_v1.
+        Hỗ trợ code_full_offline_assets/data/images với prepared release + image_index.json bổ sung.
+        cls_train.json/cls_test.csv không thay cho patient/clinical metadata của ClinDistill.
         Để thêm test: notebook03 khóa protocol trước, gắn test_protocol.json rồi đặt PREPARE_SPLITS=['test'].
         Copy cache train/validation từ input sang working trước khi thêm shard test.
     ''')
     save(path, nb)
+    features = {'cells': [
+        {'cell_type': 'markdown', 'id': 'features-only-intro', 'metadata': {}, 'source': [
+            '# COde 01 — Features only: original or flattened Qwen images\n',
+            'Attach ClinDistill bank + prepared release (image_index.json) + code_full_offline_assets. '
+            'GPU ON, Internet OFF, Run All. No re-splitting or raw CSV audit.\n']},
+        {**nb['cells'][2], 'id': 'features-only-setup'},
+        {**nb['cells'][48], 'id': 'features-only-encode'}],
+        'metadata': nb['metadata'], 'nbformat': 4, 'nbformat_minor': 5}
+    save(ROOT / 'COde_01_Features_Only.ipynb', features)
 
     path, nb = load('COde_02')
     put(nb, 0, '''
         # COde 02 — ClinDistill: KD thành phần và đối chứng
 
-        Gắn bank v5 + cache v2, chọn GPU, tắt Internet, Run All.
+        Gắn bank v5/source 0.5.1 + cache v3, chọn GPU, tắt Internet, Run All.
         Không đọc raw CSV, chia lại split hoặc mở test. DINO/BGE cố định, chỉ học MIL/fusion/head.
         Mặc định 12 hệ thống × 3 seeds + 30 OOF fits = 66 fits.
         CONFIG_FILE='research_controls.json' thêm single/mean MIL và clinical controls: 81 fits.
@@ -120,7 +165,7 @@ def refresh():
         RUN_NAME = None  # dùng run_name của config; đổi khi thay protocol
         RUN_TRAIN = True
     ''')
-    put(nb, 2, '## 1. Cài wheel offline và tìm cache\n\nDùng bank v5. Không trộn bank/cache/checkpoint cũ với source 0.5.0.')
+    put(nb, 2, '## 1. Cài wheel offline và tìm cache\n\nDùng bank v5/source 0.5.1. Không trộn bank/cache/checkpoint cũ.')
     put(nb, 3, bank.BOOTSTRAP_CELL)
     put(nb, 4, PATHS_CELL)
     put(nb, 7, '''

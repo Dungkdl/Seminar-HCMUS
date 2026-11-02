@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import venv
+import zipfile
 
 ROOT=Path(__file__).resolve().parents[2]
 spec=importlib.util.spec_from_file_location('research_bank_contracts',ROOT/'_support/research_bank.py')
@@ -46,6 +47,26 @@ class ResearchBankTests(unittest.TestCase):
         for path in files:
             self.assertNotIn(path.suffix,{'.npz','.pth','.pt','.csv','.safetensors'})
 
+    def test_addon_packages_original_image_hashes_without_images_or_qwen_assets(self):
+        spec=importlib.util.spec_from_file_location('addon_builder',ROOT/'_support/research-notes/package_kaggle.py')
+        builder=importlib.util.module_from_spec(spec); spec.loader.exec_module(builder)
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); prepared=root/'prepared'; prepared.mkdir()
+            original=root/'original'; photo=original/'Images/Photographs/a.jpg'
+            photo.parent.mkdir(parents=True); photo.write_bytes(b'synthetic hash fixture')
+            row=prepared/'student_single_train.jsonl'
+            row.write_text(json.dumps({'photo_paths':['Images/Photographs/a.jpg']})+'\n',encoding='utf-8')
+            bank.write_json(prepared/'release.json',{'release_id':'synthetic','file_checksums':{row.name:bank.digest(row)}})
+            builder.package(ROOT,root/'dist',prepared,original)
+            with zipfile.ZipFile(root/'dist/clindistill-assets-addon.zip') as archive:
+                proof=json.loads(archive.read('data/COde_processed/code_v1/image_index.json'))
+                self.assertEqual(proof['images']['Images/Photographs/a.jpg'],bank.digest(photo))
+                self.assertIn('clindistill_source/COde_01_Features_Only.ipynb',archive.namelist())
+                self.assertIn('data/COde_processed/code_v1/release.json',archive.namelist())
+                self.assertFalse(any(name.endswith('.jpg') or 'Qwen' in name for name in archive.namelist()))
+                self.assertIsNone(archive.testzip())
+            self.assertEqual(len(list((root/'dist/notebooks').glob('*.ipynb'))),5)
+
     def test_installed_wheel_is_used_even_when_working_directory_contains_source(self):
         """Reproduce the source-shadowing bug in an actual isolated pip installation."""
         spec=importlib.util.spec_from_file_location('bank_test_builder',ROOT/'_support/kaggle_offline.py')
@@ -69,7 +90,7 @@ class ResearchBankTests(unittest.TestCase):
                 "bank=importlib.util.module_from_spec(spec); spec.loader.exec_module(bank); "
                 f"info=bank.activate({str(asset)!r}); import clindistill; "
                 f"assert pathlib.Path({str(environment)!r}).resolve() in pathlib.Path(clindistill.__file__).resolve().parents; "
-                "assert clindistill.__version__=='0.5.0'; print('WHEEL_IMPORT_VERIFIED')")
+                "assert clindistill.__version__=='0.5.1'; print('WHEEL_IMPORT_VERIFIED')")
             env=os.environ.copy(); env.pop('PYTHONPATH',None)
             result=subprocess.run([str(python),'-c',script],cwd=source,env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(result.returncode,0,result.stdout+'\n'+result.stderr)

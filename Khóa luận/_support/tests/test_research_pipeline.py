@@ -3,6 +3,7 @@ import copy
 import contextlib
 import io
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -218,6 +219,18 @@ class FoundationPreparation(unittest.TestCase):
             self.assertEqual(before,FeatureStore(root/'cache',allow_debug=True).identity)
             self.assertEqual(original,file_hash(root/'cache/train.npz'))
             self.assertEqual(len(FeatureStore(root/'cache',splits=('train','validation','test'),allow_debug=True).data),3)
+            # The Qwen bundle has lowercase data/images and flattened basenames.
+            flat = root/'qwen/data'; (flat/'images').mkdir(parents=True)
+            hashes = {}
+            for photo in root.glob('*.jpg'):
+                shutil.copy2(photo, flat/'images'/photo.name)
+                hashes[photo.name] = file_hash(photo)
+            write_json(prepared/'image_index.json', {'release_id':'tiny-encoder-test', 'images':hashes})
+            prepare_features(prepared,flat,encoders,root/'flat-cache',cfg)
+            flat_store=FeatureStore(root/'flat-cache',allow_debug=True)
+            for split in ('train','validation'):
+                for key in ('image_paths','student','teacher','clinical'):
+                    np.testing.assert_array_equal(store.data[split][key],flat_store.data[split][key])
             changed=copy.deepcopy(cfg); changed['clinical_fields']=['age','examination']
             with self.assertRaisesRegex(ValueError,'Forbidden'):
                 prepare_features(prepared,root,encoders,root/'cache',changed)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "clindistill-code"
-version = "0.5.0"
+version = "0.5.1"
 description = "COde DINOv3 frozen MIL and group-OOF clinical knowledge distillation"
 requires-python = ">=3.10"
 dependencies = ["numpy", "pandas", "Pillow", "matplotlib", "scikit-learn", "torch>=2.3", "torchvision>=0.18"]
