@@ -155,10 +155,12 @@ def encode_clinical(texts, model_dir, batch_size=16, max_length=256, *, allow_de
     return output, truncated
 
 
-def prepare_features(prepared_root, image_root, asset_models, destination, config, *, splits=('train', 'validation')):
+def prepare_features(prepared_root, image_root, asset_models, destination, config, *, splits=('train', 'validation'), test_protocol=None):
     prepared, destination = Path(prepared_root), Path(destination)
     if not set(splits) <= {'train', 'validation', 'test'} or not splits:
         raise ValueError('Invalid feature splits.')
+    if 'test' in splits and not config.get('debug') and not isinstance(test_protocol, dict):
+        raise ValueError('Locked test: freeze a protocol before opening the test release.')
     release = verify_release(prepared, splits=list(splits))
     if release.get('debug_subset') and not config.get('debug'):
         raise ValueError('Mini/debug release cannot produce a production research cache.')
@@ -189,6 +191,12 @@ def prepare_features(prepared_root, image_root, asset_models, destination, confi
                'text_max_length': 256, 'demographics': 'age_div120_and_present;male_female_unknown',
                'bag_selection': 'fixed_even_filename_order_for_all_train_validation_and_OOF',
                'builder_sha256': file_hash(__file__)}
+    if 'test' in splits and not config.get('debug'):
+        from ..artifacts import code_hash
+        if (not isinstance(test_protocol, dict) or test_protocol.get('source') != code_hash()
+                or test_protocol.get('feature_request') != request
+                or test_protocol.get('identity') != object_hash({k: v for k, v in test_protocol.items() if k != 'identity'})):
+            raise ValueError('Locked test: supply the matching frozen test_protocol.json before feature extraction.')
     destination.mkdir(parents=True, exist_ok=True)
     metadata_path = destination / 'feature_manifest.json'
     previous = read_json(metadata_path) if metadata_path.exists() else None
@@ -224,6 +232,9 @@ def prepare_features(prepared_root, image_root, asset_models, destination, confi
               allow_debug=bool(config.get('debug'))) for role in roles} if pending else {}
     index = {name: i for i, name in enumerate(encode_paths)}
     manifest = previous or {'schema_version': 4, 'request': request, 'release_stage': release['stage'],
+        'pending_reviews': release.get('pending_reviews', ['Review status not supplied by release.']),
+        'annotation_note': release.get('annotation_note', 'Recorded targets; annotation review is unresolved.'),
+        'split_fingerprint': release.get('split_fingerprint'),
         'class_names': release['class_names'], 'debug': bool(config.get('debug')), 'image_identities': {},
         'model_locations': {k: str(v) for k, v in asset_models.items()}, 'splits': {}}
     for split, rows in all_rows.items():
@@ -297,7 +308,7 @@ class FeatureStore:
         if self.metadata['request'].get('builder_sha256') != file_hash(__file__):
             raise ValueError('Feature builder source changed; use a matching source bank/cache.')
         self.data = {}
-        seen = {key: set() for key in ('ids', 'patients', 'groups', 'bags')}
+        seen = {key: set() for key in ('ids', 'patients', 'groups', 'bags', 'image_paths')}
         for split in splits:
             info = self.metadata['splits'][split]
             if file_hash(self.root / f'{split}.npz') != info['sha256']:
@@ -337,11 +348,29 @@ class FeatureStore:
 
 
 class VisitDataset(Dataset):
-    def __init__(self, store, split, visual_key, *, role='student', indices=None):
+    def __init__(self, store, split, visual_key, *, role='student', indices=None,
+                 clinical_mode='full', shuffle_seed=0):
         if visual_key not in VISUAL_KEYS:
             raise ValueError('A clinical vector cannot be used as visual input.')
         self.values, self.key, self.role = store.data[split], visual_key, role
         self.indices = np.arange(len(self.values['ids'])) if indices is None else np.asarray(indices)
+        if clinical_mode not in {'full', 'demographics', 'masked', 'shuffled'}:
+            raise ValueError('Unknown clinical control.')
+        self.clinical_mode = clinical_mode
+        self.clinical_indices = self.indices.copy()
+        if clinical_mode == 'shuffled':
+            # Permute only inside this fit's training partition, never draw held-out contexts.
+            groups = self.values['groups'][self.indices]
+            unique, counts = np.unique(groups, return_counts=True)
+            if counts.max() > len(groups) // 2:
+                raise ValueError('Cannot shuffle clinical contexts between independent patient groups.')
+            rng = np.random.default_rng(shuffle_seed)
+            ordered = np.concatenate([rng.permutation(self.indices[groups == g]) for g in rng.permutation(unique)])
+            donors = np.roll(ordered, int(counts.max()))
+            mapping = dict(zip(ordered.tolist(), donors.tolist()))
+            self.clinical_indices = np.asarray([mapping[int(i)] for i in self.indices])
+            if np.any(self.values['groups'][self.clinical_indices] == groups):
+                raise ValueError('Clinical shuffle retained a patient group.')
 
     def __len__(self):
         return len(self.indices)
@@ -352,9 +381,16 @@ class VisitDataset(Dataset):
         item = {'visual': torch.from_numpy(data[self.key][images].astype(np.float32)),
                 'label': int(data['labels'][i]), 'index': i, 'case_id': str(data['ids'][i])}
         if self.role == 'multimodal_teacher':
-            item.update(clinical=torch.from_numpy(data['clinical'][i].astype(np.float32)),
-                        demographics=torch.from_numpy(data['demographics'][i].astype(np.float32)),
-                        clinical_present=bool(data['clinical_present'][i]))
+            j = int(self.clinical_indices[offset])
+            clinical = torch.from_numpy(data['clinical'][j].astype(np.float32))
+            demo = torch.from_numpy(data['demographics'][j].astype(np.float32))
+            present = bool(data['clinical_present'][j])
+            if self.clinical_mode in {'demographics', 'masked'}:
+                clinical.zero_()
+                present = bool(demo[1:4].any())
+            if self.clinical_mode == 'masked':
+                demo.zero_(); present = False
+            item.update(clinical=clinical, demographics=demo, clinical_present=present)
         return item
 
 

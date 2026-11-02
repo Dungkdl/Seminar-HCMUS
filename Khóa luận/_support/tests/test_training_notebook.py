@@ -32,7 +32,7 @@ class TrainingNotebookTests(unittest.TestCase):
                 for key,value in replacements.items():
                     if value is not None:
                         source=source.replace(f'{key} = None',f'{key} = {str(value)!r}')
-                source=source.replace("CONFIG = read_json(PROJECT_ROOT / 'configs/code/research.json')","CONFIG = DEBUG_CONFIG.copy()")
+                source=source.replace("CONFIG = read_json(PROJECT_ROOT / 'configs/code' / CONFIG_FILE)","CONFIG = DEBUG_CONFIG.copy()")
                 exec(compile(source,'COde_02_Train_Baselines.ipynb','exec'),namespace)
         import matplotlib.pyplot as plt
         plt.close('all')
@@ -42,7 +42,7 @@ class TrainingNotebookTests(unittest.TestCase):
         from clindistill.research.training import study_plan
         cfg=read_json(self.project/'configs/code/research.json')
         self.assertEqual(cfg['seeds'],[2026,2027,2028]); self.assertEqual(cfg['folds'],5)
-        self.assertEqual(study_plan(cfg)['total_fits'],57)
+        self.assertEqual(study_plan(cfg)['total_fits'],66)
         self.assertIn('student_no_kd',cfg['methods']); self.assertIn('kd_reliability',cfg['methods'])
         namespace={}; exec(next(c.source for c in self.notebook.cells if c.cell_type=='code'),namespace)
         self.assertTrue(namespace['RUN_TRAIN'])
@@ -56,10 +56,10 @@ class TrainingNotebookTests(unittest.TestCase):
             cache=synthetic_features(root/'cache',encoders=encoders)
             ns=self.execute(root,cache); study=ns['STUDY_ROOT']
             self.assertTrue((study/'completed.json').is_file())
-            self.assertEqual(len(read_json(study/'completed.json')['results']),9)
+            self.assertEqual(len(read_json(study/'completed.json')['results']),2+len(config()['methods']))
             self.assertFalse(read_json(study/'completed.json')['test_opened'])
             self.assertTrue((study/'learning_curves.png').is_file())
-            self.assertTrue((root/'output/student_export/code_research_v1/student_manifest.json').is_file())
+            self.assertTrue((root/'output/student_export/code_research_v2/student_manifest.json').is_file())
             hashes={p.relative_to(study):file_hash(p) for p in study.rglob('*.pt')}
             self.execute(root,cache)
             self.assertEqual(hashes,{p.relative_to(study):file_hash(p) for p in study.rglob('*.pt')})
@@ -67,7 +67,7 @@ class TrainingNotebookTests(unittest.TestCase):
             self.assertEqual(saved.parent.resolve(),root.resolve())
             self.assertEqual(study.parents[1].resolve(),(root/'output').resolve())
             (root/'output').rename(saved)
-            restored=self.execute(root,cache,previous=saved/'runs/code_research_v1')['STUDY_ROOT']
+            restored=self.execute(root,cache,previous=saved/'runs/code_research_v2')['STUDY_ROOT']
             self.assertEqual(hashes,{p.relative_to(restored):file_hash(p) for p in restored.rglob('*.pt')})
 
     def test_corrupt_cache_fails_before_training(self):

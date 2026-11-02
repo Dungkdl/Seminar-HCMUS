@@ -89,7 +89,7 @@ class ResearchInvariants(unittest.TestCase):
 
     def test_primary_plan_and_clinical_label_independence(self):
         cfg = read_json(PROJECT/'configs/code/research.json')
-        self.assertEqual(study_plan(cfg)['total_fits'],57)
+        self.assertEqual(study_plan(cfg)['total_fits'],66)
         row = {'age_raw':'32','gender_raw':'Female','clinical_raw_allowlist':{
             'chief_complaint':'pain for two days','diagnosis':'secret target','examination':'diagnosis label'}}
         original = clinical_input(row,cfg['clinical_fields'])
@@ -147,7 +147,7 @@ class ResearchInvariants(unittest.TestCase):
             root=Path(d); encoders=tiny_encoders(root/'encoders')
             cache=synthetic_features(root/'features',encoders=encoders); cfg=config(); study=root/'study'
             summary=run_study(cache,study,cfg,require_gpu=False)
-            self.assertEqual(len(summary),9)
+            self.assertEqual(len(summary),2 + len(cfg['methods']))
             proof=read_json(study/'_oof/seed_2026/targets.json')
             self.assertEqual(proof['weight_normalization'],'fixed_global_OOF_train_mean')
             for fold in proof['folds']:
@@ -157,7 +157,7 @@ class ResearchInvariants(unittest.TestCase):
             run_study(cache,study,cfg,require_gpu=False)
             self.assertEqual(hashes,{p:file_hash(p) for p in hashes})
             table,_=evaluate_study(cache,study)
-            self.assertEqual(len(table),9)
+            self.assertEqual(len(table),2 + len(cfg['methods']))
             with self.assertRaisesRegex(ValueError,'Locked test'):
                 evaluate_study(cache,study,split='test')
             export=export_student(cache,study,encoders['student'],root/'export')

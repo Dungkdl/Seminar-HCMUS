@@ -12,11 +12,15 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 import uuid
+import zipfile
 from contextlib import contextmanager
 
 BASE_PACKAGES = ('numpy', 'pandas', 'Pillow', 'matplotlib', 'scipy', 'scikit-learn', 'torch', 'torchvision')
 ADDONS = ('transformers==4.57.1', 'safetensors>=0.4', 'sentencepiece>=0.2')
+BUILD_TOOLS = ('setuptools>=68', 'wheel>=0.43')
+BANK_SCHEMA = 5
 MODEL_IDS = {'student': 'facebook/dinov3-vitb16-pretrain-lvd1689m',
              'teacher': 'facebook/dinov3-vitl16-pretrain-lvd1689m', 'clinical': 'BAAI/bge-m3'}
 CNN_URLS = {'resnet50': 'https://download.pytorch.org/models/resnet50-11ad3fa6.pth',
@@ -67,8 +71,33 @@ def source_files(root):
     files = [root / 'pyproject.toml', root / 'README.md'] + sorted(root.glob('COde_0*.ipynb'))
     files += sorted((root / 'clindistill').rglob('*.py')) + sorted((root / 'configs/code').glob('*.json'))
     files += [root / '_support' / name for name in ('research_bank.py', 'kaggle_offline.py',
-              'backbone_extension.py', 'training_runtime.py', 'recover_amp_bundle.py', 'TECHNICAL_GUIDE.md')]
+              'backbone_extension.py', 'training_runtime.py', 'recover_amp_bundle.py', 'TECHNICAL_GUIDE.md',
+              'KAGGLE_RUNBOOK.md', 'VERIFICATION.md')]
     return [p for p in files if p.is_file()]
+
+
+def verify_project_wheel(wheel, source):
+    """Every packaged Python module must match the reviewed source, including subpackages."""
+    expected = {p.relative_to(source).as_posix(): p.read_bytes()
+                for p in (Path(source) / 'clindistill').rglob('*.py')}
+    with zipfile.ZipFile(wheel) as archive:
+        actual = {name: archive.read(name) for name in archive.namelist()
+                  if name.startswith('clindistill/') and name.endswith('.py')}
+    if actual != expected:
+        raise ValueError('Project wheel differs from reviewed source; rebuild the package.')
+    return {name: digest(Path(source) / name) for name in sorted(expected)}
+
+
+def installed_project_matches(files):
+    """Verify the installed wheel; importing source must not silently bypass it."""
+    spec = importlib.util.find_spec('clindistill')
+    if spec is None or not spec.origin:
+        raise RuntimeError('Project wheel is not installed.')
+    root = Path(spec.origin).resolve().parent.parent
+    actual = {p.relative_to(root).as_posix(): digest(p) for p in (root / 'clindistill').rglob('*.py')}
+    if actual != files:
+        raise ValueError('Installed project differs from the bank wheel.')
+    return root / 'clindistill'
 
 
 def prepare(source, destination):
@@ -79,15 +108,28 @@ def prepare(source, destination):
     manifest_path = destination / 'research_bank_manifest.json'
     if manifest_path.exists():
         verify(destination)
+        expected_source = {p.relative_to(source).as_posix(): digest(p) for p in source_files(source)}
+        saved = {p.removeprefix('source/'): h for p, h in read_json(manifest_path)['files'].items()
+                 if p.startswith('source/')}
+        if expected_source != saved:
+            raise ValueError('Prepared bank belongs to different source. Choose a new bank directory.')
         return read_json(manifest_path)
     base = inventory()
     constraints = destination / 'base-constraints.txt'
     constraints.write_text(''.join(f'{k}=={v}\n' for k, v in base['packages'].items()), encoding='utf-8')
     wheelhouse = destination / 'wheels'; wheelhouse.mkdir(exist_ok=True)
+    online_env = os.environ.copy()
+    for key in ('PIP_NO_INDEX', 'HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE'):
+        online_env.pop(key, None)
     run([sys.executable, '-m', 'pip', 'download', '--only-binary=:all:', '--constraint', constraints,
-         '--dest', wheelhouse, *ADDONS])
+         '--dest', wheelhouse, *ADDONS, *BUILD_TOOLS], env=online_env)
+    # Freeze the complete downloaded dependency closure, not just the three top-level addons.
+    locked = sorted({f'{p.name.split("-")[0].replace("_", "-")}=={p.name.split("-")[1]}'
+                     for p in wheelhouse.glob('*.whl') if not p.name.startswith('clindistill_code-')})
+    lock = destination / 'requirements.lock'
+    lock.write_text('\n'.join(locked) + '\n', encoding='utf-8')
     run([sys.executable, '-m', 'pip', 'install', '--no-index', '--find-links', wheelhouse,
-         '--constraint', constraints, *ADDONS])
+         '--constraint', constraints, '--requirement', lock])
     payload = destination / 'source'
     for path in source_files(source):
         target = payload / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
@@ -100,9 +142,16 @@ def prepare(source, destination):
     shutil.copytree(payload / 'clindistill', staging / 'clindistill')
     run([sys.executable, '-m', 'pip', 'wheel', '--no-index', '--no-deps', '--no-build-isolation',
          '--wheel-dir', wheelhouse, staging])
+    project = list(wheelhouse.glob('clindistill_code-*-py3-none-any.whl'))
+    if len(project) != 1:
+        raise ValueError('Expected exactly one fresh project wheel.')
+    project_files = verify_project_wheel(project[0], payload)
+    run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps', '--force-reinstall', project[0]])
     # Do not download gated weights until explicit access has been granted by the model owner.
     from huggingface_hub import HfApi, snapshot_download
     token = os.environ.get('HF_TOKEN') or None
+    for key in ('HF_HUB_OFFLINE', 'TRANSFORMERS_OFFLINE'):
+        os.environ.pop(key, None)
     api = HfApi(token=token); revisions, models = {}, {}
     revision_path = destination / 'model_revisions.json'
     pinned = read_json(revision_path) if revision_path.exists() else {}
@@ -147,8 +196,10 @@ def prepare(source, destination):
              if p.is_file() and not {'.cache', '__pycache__'} & set(p.relative_to(destination).parts)}
     files['base-constraints.txt'] = digest(constraints)
     files['model_revisions.json'] = digest(revision_path)
-    manifest = {'schema_version': 4, 'status': 'assets_verified_backends_loaded', 'base_environment': base,
+    files['requirements.lock'] = digest(lock)
+    manifest = {'schema_version': BANK_SCHEMA, 'status': 'assets_verified_backends_loaded', 'base_environment': base,
                 'models': models, 'model_revisions': revisions, 'files': files,
+                'project_wheel': project[0].relative_to(destination).as_posix(), 'project_files': project_files,
                 'source_files': sorted(p for p in files if p.startswith('source/')),
                 'note': 'Backend loading passed; run the small end-to-end research rehearsal before a full study.'}
     write_json(manifest_path, manifest)
@@ -158,8 +209,8 @@ def prepare(source, destination):
 
 def verify(root, *, check_environment=True):
     root = Path(root).resolve(); info = read_json(root / 'research_bank_manifest.json')
-    if info.get('schema_version') != 4:
-        raise ValueError('Expected the new research bank, not code_offline_v1.')
+    if info.get('schema_version') != BANK_SCHEMA:
+        raise ValueError('Expected research bank v5; prepare a new bank instead of mixing old source/wheels.')
     if check_environment and info['base_environment'] != inventory():
         raise RuntimeError('Python/platform/base scientific stack differs from preparation. Prepare on the matching Kaggle image.')
     print('Verifying research bank checksums...', flush=True)
@@ -176,19 +227,27 @@ def activate(root):
         raise RuntimeError('Restart the kernel and run setup before importing clindistill.')
     info = verify(root)
     wheels = root / 'wheels'
+    os.environ.update(HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', PIP_NO_INDEX='1',
+                      HF_HUB_DISABLE_TELEMETRY='1', TOKENIZERS_PARALLELISM='false')
     # Installing a different Transformers after importing it leaves stale Python classes.
     if any(x in sys.modules for x in ('transformers', 'tokenizers')):
         raise RuntimeError('Restart the kernel; activate research wheels before Transformers imports.')
     run([sys.executable, '-m', 'pip', 'install', '--no-index', '--find-links', wheels,
-         '--constraint', root / 'base-constraints.txt', *ADDONS])
+         '--constraint', root / 'base-constraints.txt', '--requirement', root / 'requirements.lock'])
     project = list(wheels.glob('clindistill_code-*-py3-none-any.whl'))
     if len(project) != 1:
         raise ValueError('Expected exactly one research project wheel.')
     run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps', '--force-reinstall', project[0]])
-    sys.path.insert(0, str(root / 'source'))
-    os.environ['HF_HUB_OFFLINE'] = '1'; os.environ['TRANSFORMERS_OFFLINE'] = '1'
+    verify_project_wheel(project[0], root / 'source')
+    # Remove source checkouts from import search paths; configs/docs still live in source_root.
+    installed_roots = {Path(sysconfig.get_path(key)).resolve() for key in ('purelib', 'platlib')}
+    sys.path[:] = [p for p in sys.path if Path(p or os.getcwd()).resolve() in installed_roots
+                  or not (Path(p or os.getcwd()).resolve() / 'clindistill').is_dir()]
+    installed = installed_project_matches(info['project_files'])
+    print('Installed project wheel:', installed, flush=True)
     return {'root': root, 'source_root': root / 'source',
-            'models': {k: root / v for k, v in info['models'].items()}, 'manifest': info}
+            'models': {k: root / v for k, v in info['models'].items()}, 'manifest': info,
+            'installed_project': installed}
 
 
 BOOTSTRAP_CELL = '''from pathlib import Path
