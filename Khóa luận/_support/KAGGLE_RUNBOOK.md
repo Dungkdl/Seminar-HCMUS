@@ -48,7 +48,7 @@ py -3.14 "Khóa luận/_support/research-notes/package_kaggle.py" --prepared-roo
 
 ### Chạy theo đúng thứ tự
 
-1. **00:** gắn addon/source đã giải nén, Internet ON, `HF_TOKEN` có quyền DINO, `RUN_MINI_REHEARSAL=False`; `BANK_ROOT=Path('/kaggle/working/clindistill_research_v3')`. Dùng image môi trường khớp phiên GPU đích; Save & Run All, giữ output. Không cài wheelhouse Qwen vào kernel này.
+1. **00:** gắn addon/source đã giải nén, **Accelerator=None (CPU), Internet ON**, `HF_TOKEN` có quyền DINO, `RUN_MINI_REHEARSAL=False`; `BANK_ROOT=Path('/kaggle/working/clindistill_research_v3')`. So inventory với phiên GPU trước khi tải; Save & Run All, giữ output. Không cài wheelhouse Qwen vào kernel này.
 2. **01 Features Only:** import `COde_01_Features_Only.ipynb`, gắn **assets cũ + addon + output00**, chọn GPU Pro 6000, Internet OFF. Run All chỉ bootstrap và trích features; không cần `complete_dataset.csv`, không chạy lại audit/split. Mặc định chỉ train/validation.
 3. **02:** gắn **output00 + output01**, GPU ON, Internet OFF. Giữ `CONFIG_FILE='research.json'`, `RUN_NAME=None`. Study mới là `runs/code_research_v3`, 66 fits. Profile controls dùng `research_controls.json`, 81 fits; giữ đúng config ở notebook03.
 4. **03:** gắn **output00 + output01 + output02**, `SPLIT='validation'`, `LOCK_TEST_PROTOCOL=False`; Run All. Chưa mở test khi chưa khóa protocol.
@@ -66,6 +66,16 @@ CLINICAL_BATCH_SIZE = 'auto'
 Notebook giữ nguyên canonical image paths của CODe, tìm ảnh theo basename trong bundle và so SHA256 với ảnh gốc trước khi chạy encoder. Thiếu ảnh, trùng basename hoặc ảnh đã bị đổi/resize sẽ dừng. Không bỏ ca thiếu ảnh rồi train trên cohort khác; khi đó gắn thêm CODe-Dataset gốc và đặt IMAGE_ROOT_OVERRIDE tới root có `Images/Photographs`.
 
 ### Cấu hình hiệu năng
+
+**Khi Kaggle báo `Internet cannot be enabled for this competition with the current accelerator`:** dừng session Pro6000 của notebook00, chọn Accelerator=None, bật Internet và khởi động session mới. Chỉ notebook00 cần mạng để đọc Secrets/tải wheels/weights. Notebook01/02 dùng Pro6000 offline sau khi bank đã lưu.
+
+Notebook00 mới thử kết nối công khai tới Hugging Face trước khi đọc Secrets; phân biệt lỗi mạng, quyền đọc Kaggle Secret và token rỗng, không in giá trị secret hoặc exception có thể chứa nó. Chưa đọc được Secret thì chưa xác thực token với Hugging Face. [Kaggle Secrets client](https://github.com/Kaggle/docker-python/blob/main/patches/kaggle_secrets.py), [Kaggle web client](https://github.com/Kaggle/docker-python/blob/main/patches/kaggle_web_client.py).
+
+CPU và GPU có thể khác Python/Torch/CUDA build. Trên GPU, chạy `MODE='inspect'`, sao chép inventory JSON vào `TARGET_ENVIRONMENT` của notebook00 online. Bản mới cho phép **chỉ Torch và torchvision khác hậu tố `+cpu` → cùng hậu tố `+cuNNN`**, giữ đúng release gốc, Python/platform và tất cả scientific packages. Trường hợp đã ghi nhận ngày 03/11/2026: CPU là torch2.11.0+cpu/torchvision0.26.0+cpu; Pro6000 là torch2.11.0+cu130/torchvision0.26.0+cu130, các mục còn lại khớp. Đây là các bản phân phối CPU/CUDA của cùng release theo [PyTorch](https://pytorch.org/get-started/previous-versions/).
+
+Manifest ghi `preparation_environment` là CPU thật, `base_environment` là GPU đích và chỉ chứng nhận local CPU model loading. Khi activate trên GPU, kiểm tra target vẫn **khớp hoàn toàn**, không bỏ hậu tố CUDA hoặc sửa manifest bằng tay. Wheelhouse addons bị chặn nếu chứa torch/torchvision/torchaudio/triton hoặc NVIDIA CUDA wheels; không cài lại Torch trong CPU/GPU session. Compiled Torch extensions chưa được hỗ trợ bởi cơ chế này.
+
+Notebook00 mới chứa inline helpers nên có thể thay riêng file notebook, dùng tiếp addon0.5.1 đã upload; không cần upload lại ảnh/prepared metadata/source chỉ để sửa thông báo lỗi này.
 
 Notebook in tên GPU, total/free VRAM, compute capability, Torch/CUDA và chạy một kernel kiểm tra. RTX PRO 6000 Blackwell là sm_120; PyTorch 2.7 đã giới thiệu build CUDA 12.8 hỗ trợ Blackwell. Dùng image/build hỗ trợ GPU thực tế; không dùng wheels Windows hoặc tự ghi đè torch của bank trong kernel offline. [NVIDIA GPU list](https://developer.nvidia.com/cuda/gpus), [PyTorch Blackwell support](https://pytorch.org/blog/pytorch-2-7/).
 
@@ -129,7 +139,7 @@ with zipfile.ZipFile(archive) as z:
 2. Add Input: source dataset. Lần đầu chưa cần prepared release hoặc raw data.
 3. Chấp nhận điều khoản ở Hugging Face cho [DINOv3-B](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m) và [DINOv3-L](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m).
 4. Tạo Kaggle Secret `HF_TOKEN`, cấp quyền cho notebook. Không ghi token vào source.
-5. Bật Internet. Giữ `MODE='prepare'`, `RUN_MINI_REHEARSAL=False`, `BANK_ROOT='/kaggle/working/clindistill_research_v3'`. Run All.
+5. Chọn **Accelerator=None (CPU)** nếu GPU đích chặn mạng; bật Internet. So `TARGET_ENVIRONMENT` với inventory GPU. Giữ `MODE='prepare'`, `RUN_MINI_REHEARSAL=False`, `BANK_ROOT='/kaggle/working/clindistill_research_v3'`. Run All.
 6. Save Version để giữ output. Phiên sau gắn **Notebook Output**, không cần tải bank về máy rồi upload lại.
 
 Bank chứa `research_bank_manifest.json` schema5, `requirements.lock`, `base-constraints.txt`, `wheels/`, `models/`, `source/`. Model revisions và mọi artifact được ghi checksum. Không có fallback sang random weights khi thiếu quyền model.

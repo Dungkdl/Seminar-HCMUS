@@ -1,5 +1,6 @@
 """Refresh entry points and reviewed bootstrap, retaining the data-audit implementation."""
 import importlib.util
+import inspect
 import json
 from pathlib import Path
 import textwrap
@@ -49,12 +50,17 @@ def refresh():
         # COde 00 — Research wheel bank v5
 
         Chạy ONLINE trên Linux/Kaggle có cùng Python/scientific stack với phiên GPU đích.
+        Nếu RTX PRO 6000 chặn Internet: notebook00 dùng Accelerator=None (CPU), Internet ON.
+        Notebook01/02 mới dùng Pro6000, Internet OFF. Lỗi đọc Secrets chưa chứng minh HF token sai.
+        TARGET_ENVIRONMENT có thể giữ inventory từ MODE='inspect' trên GPU để so trước khi tải.
         Gắn source 0.5.1 đã giải nén. Chưa có prepared release vẫn chạy: RUN_MINI_REHEARSAL=False.
         Bank chứa project wheel, dependency wheelhouse + requirements.lock, source/configs và pretrained weights có checksum.
         Chấp nhận điều khoản DINOv3-B/L, thêm Kaggle Secret HF_TOKEN và cấp quyền cho notebook.
         Hướng dẫn: _support/KAGGLE_RUNBOOK.md. Bank v4 không dùng cho source mới.
     ''')
     source = ''.join(nb['cells'][1]['source'])
+    if 'TARGET_ENVIRONMENT = ' not in source:
+        source = source.replace("MODE = 'prepare'", "TARGET_ENVIRONMENT = None  # paste inventory from Pro6000 inspect; CPU stack must match\nMODE = 'prepare'")
     source = source.replace('code_research_bank_v1', 'clindistill_research_v3').replace('code_research_bank_v2', 'clindistill_research_v3')
     source = source.replace("{'Images','.git','.cache','_support','models','wheels','_archive'}",
         "{'Images','images','.git','.cache','_support','models','wheels','wheelhouse','official_code','_archive'} and not d.lower().startswith('qwen')")
@@ -65,6 +71,38 @@ def refresh():
 runtime_spec = importlib.util.spec_from_file_location('research_hardware', source / 'clindistill/research/runtime.py')
 runtime = importlib.util.module_from_spec(runtime_spec); runtime_spec.loader.exec_module(runtime)
 print(json.dumps(runtime.hardware(), indent=2))""")
+    start = source.index("if MODE == 'prepare':\n")
+    source = source[:start] + '''if MODE == 'prepare':
+    if TARGET_ENVIRONMENT is None and bank.inventory()['packages']['torch'].endswith('+cpu'):
+        raise RuntimeError('CPU online setup needs TARGET_ENVIRONMENT copied from GPU MODE=inspect. '
+                           'The bank must record the GPU target, not the CPU Torch build.')
+    if TARGET_ENVIRONMENT is not None:
+        bridge = require_preparation_environment(TARGET_ENVIRONMENT, bank.inventory())
+        if bridge:
+            print('CPU online -> CUDA target: same Torch/vision releases; all other packages match. GPU activation remains strict.')
+    check_online()
+    read_hf_token()
+    # Backward-compatible prepare implementation for the existing uploaded 0.5.1 addon.
+    PREPARATION_COMPAT_PLACEHOLDER
+    info = bank.prepare(source, BANK_ROOT, target_environment=TARGET_ENVIRONMENT)
+elif MODE == 'inspect':
+    print('INSPECT ONLY: no network, Secrets or downloads. Copy the inventory JSON into TARGET_ENVIRONMENT on the online CPU notebook.')
+else:
+    raise ValueError('MODE must be inspect or prepare.')
+'''
+    # Inline stdlib-only helpers so the replacement works with the uploaded 0.5.1 addon.
+    marker = '# Online preparation helpers (safe with the existing 0.5.1 addon)\n'
+    if marker in source:
+        left = source.index(marker)
+        right = source.index("if MODE == 'prepare':\n", left)
+        source = source[:left] + source[right:]
+    helpers = '\n\n'.join(inspect.getsource(getattr(bank, name)).strip()
+        for name in ('require_environment', 'require_preparation_environment', 'check_online', 'read_hf_token'))
+    prepare_helpers = '\n\n'.join(inspect.getsource(getattr(bank, name)).strip()
+        for name in ('require_environment', 'require_preparation_environment', 'prepare'))
+    source = source.replace('PREPARATION_COMPAT_PLACEHOLDER', f'exec({prepare_helpers!r}, bank.__dict__)')
+    start = source.index("if MODE == 'prepare':\n")
+    source = source[:start] + marker + helpers + '\n\n' + source[start:]
     put(nb, 1, source)
     source = ''.join(nb['cells'][3]['source']).replace("sys.path.insert(0, str(BANK_ROOT / 'source'))", "bank.installed_project_matches(info['project_files'])")
     put(nb, 3, source)

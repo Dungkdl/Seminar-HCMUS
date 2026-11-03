@@ -1,5 +1,13 @@
 # Kiểm chứng implementation v5 — 02/11/2026
 
+## Bổ sung 03/11/2026: online CPU → Pro6000 offline
+
+- **56 tests qua** với Transformers4.57.1/huggingface-hub0.36.2 trên môi trường local đã nêu. Tám tests mới phân biệt network/Secret access/empty token, không lộ token trong traceback, kiểm tra môi trường và chuẩn bị bank CPU cho CUDA target.
+- CPU→CUDA chỉ cho phép Torch/torchvision cùng release, khác hậu tố CPU/CUDA; Python/platform và mọi scientific package còn lại phải khớp. GPU activation vẫn kiểm tra đúng CUDA build, không nới fingerprint.
+- Test mô phỏng chuẩn bị đầy đủ bank ghi targetCUDA và preparationCPU riêng, kiểm tra resume, từ chối CPU activation và Torch/CUDA wheels trong addon wheelhouse. HF API/model loading và subprocess trong test này được giả lập, không phải tải pretrained hoặc chạy GPU thật.
+- Notebook00 replacement chứa prepare/helper tương thích với addon0.5.1 đã upload. Kiểm tra compatibility patch nạp được vào chính helper cũ trong addon local. Project wheel/modules và feature builder không đổi, không cần thay prepared release/cache chỉ vì lỗi setup này.
+- User output xác nhận RTX PRO6000 nhận đúng CUDA13.0/Torch2.11.0+cu130, CPU có cùng scientific stack ngoài Torch/vision +cpu. Chưa xác nhận bank mới đã tải hoàn tất hoặc inference/training trên Kaggle GPU.
+
 ## Bổ sung package 0.5.1: assets Qwen và cấu hình GPU
 
 - **48 tests qua** với Python 3.14.2, torch 2.11.0+cu128, Transformers 4.57.1, huggingface-hub 0.36.2. Năm notebook qua nbformat/AST, không có execution outputs.
