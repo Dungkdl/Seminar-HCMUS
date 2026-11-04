@@ -3,16 +3,18 @@ import csv
 import json
 from pathlib import Path
 import re
+import time
 
 import numpy as np
 from PIL import Image, ImageOps
 import torch
 from torch.nn import functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 from torchvision.transforms import functional as TF
 
 from ..artifacts import file_hash, object_hash, read_json, verify_release, write_json
 from ..data import load_records, check_disjoint, deterministic_paths
+from .runtime import feature_settings
 
 ALLOWED_FIELDS = {'age', 'gender', 'chief_complaint', 'present_illness', 'past_medical_record'}
 DIAGNOSTIC = re.compile(r'\b(?:diagnos(?:is|ed|tic)|treatment\s+plan|ICD[- ]?\d*|caries|gingivitis|malocclusion|pulpitis|tooth\s+loss|tooth\s+structure\s+loss)\b', re.I)
@@ -58,7 +60,70 @@ def clinical_input(row, fields):
     return text, demographics, present, blocked
 
 
-def encode_images(paths, image_root, model_dir, kind, image_size, batch_size, chunk_root, *, allow_debug=False):
+def resolve_image_sources(paths, image_root, image_index=None):
+    """Map canonical paths to original or flattened photos, verifying original bytes."""
+    root = Path(image_root).resolve()
+    sources = {}
+    physical = set()
+    for relative in paths:
+        canonical = (root / relative).resolve()
+        if root not in canonical.parents:
+            raise ValueError('Unsafe image path.')
+        source = canonical
+        if not source.is_file():
+            candidates = {p.resolve() for p in (root / 'images' / Path(relative).name,
+                                                root / Path(relative).name) if p.is_file()}
+            if len(candidates) != 1:
+                raise FileNotFoundError(f'Missing or ambiguous flattened image: {relative}. Set IMAGE_ROOT_OVERRIDE.')
+            if image_index is None or relative not in image_index:
+                raise ValueError('Flattened Qwen images require image_index.json from the original CODe images.')
+            source = candidates.pop()
+        if root not in source.parents or source in physical:
+            raise ValueError('Unsafe or colliding flattened image mapping.')
+        if image_index is not None and (relative not in image_index or file_hash(source) != image_index[relative]):
+            raise ValueError(f'Image bytes differ from the original audited CODe image: {relative}')
+        sources[relative] = str(source)
+        physical.add(source)
+    return sources
+
+
+class FrozenImageDataset(Dataset):
+    def __init__(self, paths, sources, image_size, mean, std):
+        self.paths, self.sources, self.image_size, self.mean, self.std = paths, sources, image_size, mean, std
+
+    def __len__(self):
+        return len(self.paths)
+
+    def __getitem__(self, index):
+        with Image.open(self.sources[self.paths[index]]) as opened:
+            image = ImageOps.exif_transpose(opened).convert('RGB')
+        image = ImageOps.pad(image, (self.image_size, self.image_size),
+                             method=Image.Resampling.BILINEAR, color=(0, 0, 0))
+        return TF.normalize(TF.to_tensor(image), self.mean, self.std)
+
+
+def adaptive_image_forward(batch, forward, *, device, state=None):
+    """Retry only CUDA OOM with smaller microbatches, retaining image order."""
+    limit = state.get('batch_size', len(batch)) if state is not None else len(batch)
+    if len(batch) > limit:
+        return torch.cat([adaptive_image_forward(part, forward, device=device, state=state)
+                          for part in batch.split(limit)])
+    try:
+        return forward(batch.to(device, non_blocking=True)).cpu()
+    except torch.cuda.OutOfMemoryError:
+        if len(batch) <= 1:
+            raise
+    torch.cuda.empty_cache()
+    middle = len(batch) // 2
+    if state is not None:
+        state['batch_size'] = min(state['batch_size'], middle)
+    print(f'CUDA OOM: retry frozen encoder batch {len(batch)} as {middle}+{len(batch)-middle}', flush=True)
+    return torch.cat([adaptive_image_forward(part, forward, device=device, state=state)
+                      for part in (batch[:middle], batch[middle:])])
+
+
+def encode_images(paths, image_root, model_dir, kind, image_size, batch_size, chunk_root, *, allow_debug=False,
+                  workers=0, chunk_size=2048, image_sources=None):
     from transformers import AutoModel
     from torchvision import models
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -81,11 +146,30 @@ def encode_images(paths, image_root, model_dir, kind, image_size, batch_size, ch
         mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
     model.eval().requires_grad_(False).to(device)
     precision = torch.bfloat16 if device.type == 'cuda' and torch.cuda.is_bf16_supported() else torch.float16
+    sources = image_sources or resolve_image_sources(paths, image_root)
+    dataset = FrozenImageDataset(paths, sources, image_size, mean, std)
+    sampler = []  # Reused loader keeps workers alive between durable chunks.
+    loader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=workers,
+                        pin_memory=device.type == 'cuda', persistent_workers=workers > 0,
+                        generator=torch.Generator().manual_seed(0),
+                        **({'prefetch_factor': 2} if workers else {}))
+
+    def forward(batch):
+        with torch.inference_mode(), torch.autocast('cuda', enabled=device.type == 'cuda', dtype=precision):
+            if kind in {'student', 'teacher'}:
+                hidden = model(pixel_values=batch).last_hidden_state.float()
+                encoded = torch.cat([hidden[:, 0], hidden[:, 1 + registers:].mean(1)], -1)
+            else:
+                encoded = model(batch).float()
+            return F.normalize(encoded, dim=-1)
+
     chunk_root = Path(chunk_root)
     chunk_root.mkdir(parents=True, exist_ok=True)
     chunks = []
-    for start in range(0, len(paths), 256):
-        names = paths[start:start + 256]
+    tick, computed = time.monotonic(), 0
+    retry_state = {'batch_size': batch_size}
+    for start in range(0, len(paths), chunk_size):
+        names = paths[start:start + chunk_size]
         path = chunk_root / f'{start:08d}.npz'
         proof = path.with_suffix('.json')
         if path.exists() and proof.exists():
@@ -97,24 +181,9 @@ def encode_images(paths, image_root, model_dir, kind, image_size, batch_size, ch
                 chunks.append(data['values'].copy())
             continue
         values = []
-        for offset in range(0, len(names), batch_size):
-            tensors = []
-            for relative in names[offset:offset + batch_size]:
-                source = (Path(image_root) / relative).resolve()
-                if Path(image_root).resolve() not in source.parents:
-                    raise ValueError('Unsafe image path.')
-                with Image.open(source) as opened:
-                    image = ImageOps.exif_transpose(opened).convert('RGB')
-                image = ImageOps.pad(image, (image_size, image_size), method=Image.Resampling.BILINEAR, color=(0, 0, 0))
-                tensors.append(TF.normalize(TF.to_tensor(image), mean, std))
-            batch = torch.stack(tensors).to(device)
-            with torch.inference_mode(), torch.autocast('cuda', enabled=device.type == 'cuda', dtype=precision):
-                if kind in {'student', 'teacher'}:
-                    hidden = model(pixel_values=batch).last_hidden_state.float()
-                    encoded = torch.cat([hidden[:, 0], hidden[:, 1 + registers:].mean(1)], -1)
-                else:
-                    encoded = model(batch).float()
-                values.append(F.normalize(encoded, dim=-1).cpu().numpy().astype(np.float16))
+        sampler[:] = range(start, start + len(names))
+        for batch in loader:
+            values.append(adaptive_image_forward(batch, forward, device=device, state=retry_state).numpy().astype(np.float16))
         array = np.concatenate(values)
         temporary = path.with_suffix('.tmp')
         with temporary.open('wb') as stream:
@@ -122,8 +191,11 @@ def encode_images(paths, image_root, model_dir, kind, image_size, batch_size, ch
         temporary.replace(path)
         write_json(proof, {'sha256': file_hash(path)})
         chunks.append(array)
-        print(f'Frozen {kind}: {start + len(names):,}/{len(paths):,} photos', flush=True)
-    del model
+        computed += len(names)
+        rate = computed / max(time.monotonic() - tick, .001)
+        memory = f' peak={torch.cuda.max_memory_allocated()/2**30:.1f} GiB' if device.type == 'cuda' else ''
+        print(f'Frozen {kind}: {start + len(names):,}/{len(paths):,} photos; {rate:.1f} images/s{memory}', flush=True)
+    del loader, model
     if device.type == 'cuda':
         torch.cuda.empty_cache()
     return np.concatenate(chunks)
@@ -137,7 +209,7 @@ def encode_clinical(texts, model_dir, batch_size=16, max_length=256, *, allow_de
         raise ValueError('Expected the BGE-M3 dense text encoder.')
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=False, use_fast=True)
     output = np.zeros((len(texts), model.config.hidden_size), dtype=np.float32)
-    valid = [i for i, text in enumerate(texts) if text]
+    valid = sorted((i for i, text in enumerate(texts) if text), key=lambda i: len(texts[i]))
     truncated = 0
     for start in range(0, len(valid), batch_size):
         indices = valid[start:start + batch_size]
@@ -155,11 +227,15 @@ def encode_clinical(texts, model_dir, batch_size=16, max_length=256, *, allow_de
     return output, truncated
 
 
-def prepare_features(prepared_root, image_root, asset_models, destination, config, *, splits=('train', 'validation')):
+def prepare_features(prepared_root, image_root, asset_models, destination, config, *, splits=('train', 'validation'), test_protocol=None):
     prepared, destination = Path(prepared_root), Path(destination)
     if not set(splits) <= {'train', 'validation', 'test'} or not splits:
         raise ValueError('Invalid feature splits.')
+    if 'test' in splits and not config.get('debug') and not isinstance(test_protocol, dict):
+        raise ValueError('Locked test: freeze a protocol before opening the test release.')
     release = verify_release(prepared, splits=list(splits))
+    runtime = feature_settings(config)
+    print('Feature runtime:', runtime, flush=True)
     if release.get('debug_subset') and not config.get('debug'):
         raise ValueError('Mini/debug release cannot produce a production research cache.')
     fields = config['clinical_fields']
@@ -189,6 +265,12 @@ def prepare_features(prepared_root, image_root, asset_models, destination, confi
                'text_max_length': 256, 'demographics': 'age_div120_and_present;male_female_unknown',
                'bag_selection': 'fixed_even_filename_order_for_all_train_validation_and_OOF',
                'builder_sha256': file_hash(__file__)}
+    if 'test' in splits and not config.get('debug'):
+        from ..artifacts import code_hash
+        if (not isinstance(test_protocol, dict) or test_protocol.get('source') != code_hash()
+                or test_protocol.get('feature_request') != request
+                or test_protocol.get('identity') != object_hash({k: v for k, v in test_protocol.items() if k != 'identity'})):
+            raise ValueError('Locked test: supply the matching frozen test_protocol.json before feature extraction.')
     destination.mkdir(parents=True, exist_ok=True)
     metadata_path = destination / 'feature_manifest.json'
     previous = read_json(metadata_path) if metadata_path.exists() else None
@@ -203,12 +285,11 @@ def prepare_features(prepared_root, image_root, asset_models, destination, confi
     if {'train', 'validation'} <= set(splits):
         check_disjoint(all_rows['train'], all_rows['validation'])
     paths = sorted({p for bags in selected.values() for bag in bags for p in bag})
-    image_hashes = {}
-    for p in paths:
-        path = (Path(image_root) / p).resolve()
-        if Path(image_root).resolve() not in path.parents:
-            raise ValueError('Unsafe image path in prepared manifest.')
-        image_hashes[p] = file_hash(path)
+    image_index = read_json(prepared / 'image_index.json') if (prepared / 'image_index.json').exists() else None
+    if image_index and image_index['release_id'] != release['release_id']:
+        raise ValueError('Image index belongs to a different prepared release.')
+    image_sources = resolve_image_sources(paths, image_root, image_index['images'] if image_index else None)
+    image_hashes = {p: image_index['images'][p] if image_index else file_hash(image_sources[p]) for p in paths}
     image_identity = object_hash(image_hashes)
     split_image_ids = {split: object_hash({p: image_hashes[p] for bag in selected[split] for p in bag}) for split in splits}
     if previous:
@@ -219,11 +300,16 @@ def prepare_features(prepared_root, image_root, asset_models, destination, confi
     encode_paths = sorted({p for split in pending for bag in selected[split] for p in bag})
     # Cache checkpointed image chunks; labels are never given to foundation encoders.
     arrays = {role: encode_images(encode_paths, image_root, asset_models[role], role,
-              config['image_size'], config['image_batch_size'],
+              config['image_size'], runtime['image_batches'][role],
               destination / '_chunks' / role / object_hash([fingerprints[role], image_identity, request])[:16],
-              allow_debug=bool(config.get('debug'))) for role in roles} if pending else {}
+              allow_debug=bool(config.get('debug')), workers=runtime['workers'], chunk_size=runtime['chunk_size'],
+              image_sources=image_sources) for role in roles} if pending else {}
+    write_json(destination / 'feature_runtime.json', runtime)
     index = {name: i for i, name in enumerate(encode_paths)}
     manifest = previous or {'schema_version': 4, 'request': request, 'release_stage': release['stage'],
+        'pending_reviews': release.get('pending_reviews', ['Review status not supplied by release.']),
+        'annotation_note': release.get('annotation_note', 'Recorded targets; annotation review is unresolved.'),
+        'split_fingerprint': release.get('split_fingerprint'),
         'class_names': release['class_names'], 'debug': bool(config.get('debug')), 'image_identities': {},
         'model_locations': {k: str(v) for k, v in asset_models.items()}, 'splits': {}}
     for split, rows in all_rows.items():
@@ -242,7 +328,8 @@ def prepare_features(prepared_root, image_root, asset_models, destination, confi
                            'clinical_present': available, 'text_present': bool(text),
                            'age_present': bool(demo[1]), 'gender_present': bool(demo[2] or demo[3]),
                            'temporal_verified': policy['temporal_verified']})
-        clinical, truncated = encode_clinical(texts, asset_models['clinical'], allow_debug=bool(config.get('debug')))
+        clinical, truncated = encode_clinical(texts, asset_models['clinical'],
+            batch_size=runtime['clinical_batch_size'], allow_debug=bool(config.get('debug')))
         with (destination / f'clinical_audit_{split}.csv').open('w', encoding='utf-8', newline='') as stream:
             writer = csv.DictWriter(stream, fieldnames=list(audits[0])); writer.writeheader(); writer.writerows(audits)
         local_paths = sorted({p for bag in selected[split] for p in bag})
@@ -297,7 +384,7 @@ class FeatureStore:
         if self.metadata['request'].get('builder_sha256') != file_hash(__file__):
             raise ValueError('Feature builder source changed; use a matching source bank/cache.')
         self.data = {}
-        seen = {key: set() for key in ('ids', 'patients', 'groups', 'bags')}
+        seen = {key: set() for key in ('ids', 'patients', 'groups', 'bags', 'image_paths')}
         for split in splits:
             info = self.metadata['splits'][split]
             if file_hash(self.root / f'{split}.npz') != info['sha256']:
@@ -337,11 +424,29 @@ class FeatureStore:
 
 
 class VisitDataset(Dataset):
-    def __init__(self, store, split, visual_key, *, role='student', indices=None):
+    def __init__(self, store, split, visual_key, *, role='student', indices=None,
+                 clinical_mode='full', shuffle_seed=0):
         if visual_key not in VISUAL_KEYS:
             raise ValueError('A clinical vector cannot be used as visual input.')
         self.values, self.key, self.role = store.data[split], visual_key, role
         self.indices = np.arange(len(self.values['ids'])) if indices is None else np.asarray(indices)
+        if clinical_mode not in {'full', 'demographics', 'masked', 'shuffled'}:
+            raise ValueError('Unknown clinical control.')
+        self.clinical_mode = clinical_mode
+        self.clinical_indices = self.indices.copy()
+        if clinical_mode == 'shuffled':
+            # Permute only inside this fit's training partition, never draw held-out contexts.
+            groups = self.values['groups'][self.indices]
+            unique, counts = np.unique(groups, return_counts=True)
+            if counts.max() > len(groups) // 2:
+                raise ValueError('Cannot shuffle clinical contexts between independent patient groups.')
+            rng = np.random.default_rng(shuffle_seed)
+            ordered = np.concatenate([rng.permutation(self.indices[groups == g]) for g in rng.permutation(unique)])
+            donors = np.roll(ordered, int(counts.max()))
+            mapping = dict(zip(ordered.tolist(), donors.tolist()))
+            self.clinical_indices = np.asarray([mapping[int(i)] for i in self.indices])
+            if np.any(self.values['groups'][self.clinical_indices] == groups):
+                raise ValueError('Clinical shuffle retained a patient group.')
 
     def __len__(self):
         return len(self.indices)
@@ -352,9 +457,16 @@ class VisitDataset(Dataset):
         item = {'visual': torch.from_numpy(data[self.key][images].astype(np.float32)),
                 'label': int(data['labels'][i]), 'index': i, 'case_id': str(data['ids'][i])}
         if self.role == 'multimodal_teacher':
-            item.update(clinical=torch.from_numpy(data['clinical'][i].astype(np.float32)),
-                        demographics=torch.from_numpy(data['demographics'][i].astype(np.float32)),
-                        clinical_present=bool(data['clinical_present'][i]))
+            j = int(self.clinical_indices[offset])
+            clinical = torch.from_numpy(data['clinical'][j].astype(np.float32))
+            demo = torch.from_numpy(data['demographics'][j].astype(np.float32))
+            present = bool(data['clinical_present'][j])
+            if self.clinical_mode in {'demographics', 'masked'}:
+                clinical.zero_()
+                present = bool(demo[1:4].any())
+            if self.clinical_mode == 'masked':
+                demo.zero_(); present = False
+            item.update(clinical=clinical, demographics=demo, clinical_present=present)
         return item
 
 

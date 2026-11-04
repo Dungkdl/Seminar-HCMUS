@@ -3,8 +3,11 @@ from torch import nn
 
 
 class GatedMIL(nn.Module):
-    def __init__(self, input_dim, width, dropout):
+    def __init__(self, input_dim, width, dropout, pooling='attention'):
         super().__init__()
+        if pooling not in {'attention', 'mean', 'single'}:
+            raise ValueError('Unknown image pooling.')
+        self.pooling = pooling
         self.project = nn.Sequential(nn.Linear(input_dim, width), nn.LayerNorm(width), nn.GELU())
         self.value = nn.Linear(width, width)
         self.gate = nn.Linear(width, width)
@@ -15,21 +18,28 @@ class GatedMIL(nn.Module):
         if not mask.any(1).all():
             raise ValueError('Every visit needs at least one photo.')
         features = self.project(features.float())
-        scores = self.score(torch.tanh(self.value(features)) * torch.sigmoid(self.gate(features))).squeeze(-1)
-        weights = scores.masked_fill(~mask, -torch.inf).softmax(1)
+        if self.pooling == 'attention':
+            scores = self.score(torch.tanh(self.value(features)) * torch.sigmoid(self.gate(features))).squeeze(-1)
+            weights = scores.masked_fill(~mask, -torch.inf).softmax(1)
+        elif self.pooling == 'mean':
+            weights = mask.float() / mask.sum(1, keepdim=True)
+        else:
+            # First valid image under the same deterministic filename selection policy.
+            weights = torch.zeros_like(mask, dtype=features.dtype)
+            weights.scatter_(1, mask.long().argmax(1, keepdim=True), 1.)
         return self.dropout((features * weights.unsqueeze(-1)).sum(1)), weights
 
 
 class VisitClassifier(nn.Module):
     def __init__(self, visual_dim, classes, *, width=256, dropout=0.2,
-                 role='student', clinical_dim=0, fusion='gated', alignment_dim=0):
+                 role='student', clinical_dim=0, fusion='gated', alignment_dim=0, pooling='attention'):
         super().__init__()
         if role not in {'student', 'visual_teacher', 'multimodal_teacher'}:
             raise ValueError('Unknown research model role.')
         if fusion not in {'gated', 'concat'}:
             raise ValueError('Unknown fusion.')
         self.role, self.fusion = role, fusion
-        self.mil = GatedMIL(visual_dim, width, dropout)
+        self.mil = GatedMIL(visual_dim, width, dropout, pooling=pooling)
         if role == 'multimodal_teacher':
             if clinical_dim < 1:
                 raise ValueError('Multimodal Teacher needs clinical dimensions.')

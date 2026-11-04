@@ -10,7 +10,40 @@ from ..artifacts import code_hash, file_hash, object_hash, read_json, write_json
 from ..metrics import classification_metrics, group_bootstrap
 from ..reporting import paired_bootstrap, risk_coverage
 from .data import FeatureStore, VisitDataset, model_assets_hash, encode_images
-from .training import PRIMARY_COMPARISONS, load_model, predict, probabilities, write_predictions
+from .training import PRIMARY_COMPARISONS, ABLATION_COMPARISONS, load_model, predict, probabilities, write_predictions, dataset_for
+from .analysis import teacher_strata, stratum_metrics
+
+
+def freeze_test_protocol(feature_root, study_root, review_record):
+    """Register fitted checkpoint identities before preparing/opening the test shard."""
+    root = Path(study_root); study = read_json(root / 'study.json')
+    if not isinstance(review_record, str) or not review_record.strip():
+        raise ValueError('Locked test: supply a documented protocol/review record.')
+    if not (root / 'completed.json').is_file() or study['source'] != code_hash():
+        raise ValueError('Complete the registered study with matching source before locking test.')
+    store = FeatureStore(feature_root, allow_debug=study['debug'])
+    if store.identity != study['features']:
+        raise ValueError('Cannot lock a different train/validation feature release.')
+    checkpoints = {}
+    for name in ['teacher_visual', 'teacher_multimodal'] + study['config']['methods']:
+        for seed in study['config']['seeds']:
+            relative = f'{name}/seed_{seed}/best.pt'
+            expected = read_json(root / name / f'seed_{seed}/result.json')['checkpoint_sha256']
+            if file_hash(root / relative) != expected:
+                raise ValueError('Selected checkpoint changed before test lock.')
+            checkpoints[relative] = expected
+    protocol = {'study_identity': study['identity'], 'source': study['source'],
+                'feature_request': store.metadata['request'], 'config': study['config'],
+                'checkpoints': checkpoints, 'review_record': review_record,
+                'pending_reviews': study.get('pending_reviews', ['Unresolved review status.'])}
+    protocol['identity'] = object_hash(protocol)
+    path = root / 'test_protocol.json'
+    if path.exists():
+        if read_json(path) != protocol:
+            raise ValueError('Test protocol already locked; cannot change models, config or review record.')
+        return protocol  # Attached Kaggle Notebook Outputs are read-only.
+    write_json(path, protocol)
+    return protocol
 
 
 def evaluate_study(feature_root, study_root, output_root=None, *, split='validation', test_review_record=None):
@@ -27,6 +60,9 @@ def evaluate_study(feature_root, study_root, output_root=None, *, split='validat
     if split == 'test':
         if not isinstance(test_review_record, str) or not test_review_record.strip():
             raise ValueError('Locked test: record the frozen protocol and unresolved review limitations first.')
+        if not (root / 'test_protocol.json').is_file():
+            raise ValueError('Locked test: call freeze_test_protocol before preparing/opening test features.')
+        freeze_test_protocol(feature_root, root, test_review_record)
         store = FeatureStore(feature_root, splits=('train', 'validation', 'test'), allow_debug=bool(cfg.get('debug')))
     else:
         store = training_store
@@ -42,7 +78,7 @@ def evaluate_study(feature_root, study_root, output_root=None, *, split='validat
             if file_hash(directory / 'best.pt') != result['checkpoint_sha256']:
                 raise ValueError('Selected checkpoint checksum changed.')
             model, state = load_model(directory / 'best.pt', device)
-            logits, ids = predict(model, VisitDataset(store, split, state['visual_key'], role=state['spec']['role']), cfg, device)
+            logits, ids = predict(model, dataset_for(store, split, state['visual_key'], state['spec']['role'], name, seed), cfg, device)
             if ids != data['ids'].tolist():
                 raise ValueError('Evaluation visit order mismatch.')
             p = probabilities(logits); metrics = classification_metrics(data['labels'], p, classes)
@@ -68,17 +104,34 @@ def evaluate_study(feature_root, study_root, output_root=None, *, split='validat
     summary = table.groupby('method')[['macro_f1', 'accuracy', 'macro_auroc_defined_classes', 'brier_multiclass', 'ece_10_bins', 'aurc']].agg(['mean', 'std', 'count'])
     summary.to_csv(out / 'mean_std.csv')
     comparisons = {}
-    for right, left in PRIMARY_COMPARISONS:
+    for right, left in PRIMARY_COMPARISONS + ABLATION_COMPARISONS:
         if not all((method, seed) in predictions for method in (left, right) for seed in cfg['seeds']):
             continue
         comparisons[f'{right}_minus_{left}'] = paired_bootstrap(
             [predictions[(left, s)] for s in cfg['seeds']], [predictions[(right, s)] for s in cfg['seeds']],
             len(classes), cfg['bootstrap_repetitions'], cfg['seeds'][0])
+        comparisons[f'{right}_minus_{left}']['kind'] = 'primary' if (right, left) in PRIMARY_COMPARISONS else 'ablation'
     write_json(out / 'paired_comparisons.json', {'comparisons': comparisons,
-        'multiplicity': 'Four pre-registered contrasts; intervals are unadjusted/descriptive, not confirmatory family-wise tests.'})
+        'multiplicity': 'Pre-registered contrasts; intervals are unadjusted/descriptive, not confirmatory family-wise tests.'})
+    disagreements = {}
+    for seed in cfg['seeds']:
+        visual = predictions[('teacher_visual', seed)]
+        mm = predictions[('teacher_multimodal', seed)]
+        if not visual.case_id.equals(mm.case_id):
+            raise ValueError('Teacher strata require aligned visits.')
+        strata = teacher_strata(visual[[f'p_{i}' for i in range(len(classes))]].to_numpy(),
+                               mm[[f'p_{i}' for i in range(len(classes))]].to_numpy(), data['labels'])
+        disagreements[str(seed)] = {name: stratum_metrics(data['labels'],
+            predictions[(name, seed)][[f'p_{i}' for i in range(len(classes))]].to_numpy(), classes, strata)
+            for name in ['teacher_visual', 'teacher_multimodal'] + cfg['methods']}
+    write_json(out / 'teacher_strata.json', {'results': disagreements,
+        'interpretation': 'Descriptive groups defined by model correctness, not clinical ground truth. '
+                          'Subgroup scores are conditional and do not establish clinical dependency.'})
     write_json(out / 'status.json', {'split': split, 'study_identity': study['identity'], 'debug': study['debug'],
         'test_review_record': test_review_record, 'clinical_policy': study['clinical_policy'],
         'release_stage': study['release_stage'], 'publication_ready': False,
+        'pending_reviews': study.get('pending_reviews', ['Unresolved review status.']),
+        'annotation_note': study.get('annotation_note'),
         'limitations': ['Frozen foundation encoders; MIL/fusion/head training only.',
             'Single recorded target; clinical temporal alignment and annotation reviews may remain unresolved.',
             'COde internal evaluation only; no external dataset validation.']})
@@ -91,7 +144,7 @@ def export_student(feature_root, study_root, encoder_dir, destination, *, method
     study = read_json(root / 'study.json'); store = FeatureStore(feature_root, allow_debug=study['debug'])
     if study['source'] != code_hash() or study['features'] != store.identity:
         raise ValueError('Export protocol/source mismatch.')
-    if method not in study['config']['methods'] or method in {'resnet50_mil', 'swin_b_mil'}:
+    if method not in study['config']['methods'] or method in {'resnet50_mil', 'swin_b_mil'} or method.startswith('teacher_'):
         raise ValueError('Select a DINO-B Student method registered in this study.')
     if model_assets_hash(encoder_dir) != store.metadata['request']['model_fingerprints']['student']:
         raise ValueError('Student image encoder differs from the feature encoder.')
@@ -126,7 +179,8 @@ def export_student(feature_root, study_root, encoder_dir, destination, *, method
         raise ValueError('Exported image encoder integrity mismatch.')
     manifest = {**expected, 'head_sha256': file_hash(destination / 'student_head.pt'),
         'source': code_hash(), 'class_names': store.metadata['class_names'],
-        'image_size': study['config']['image_size'], 'max_photos': study['config']['max_photos'],
+        'image_size': study['config']['image_size'],
+        'max_photos': 1 if state['spec'].get('pooling') == 'single' else study['config']['max_photos'],
         'debug': study['debug'], 'input': 'photos only; no clinical data or labels',
         'selection': 'registered method; highest validation macro-F1 seed, tie -> smaller seed'}
     write_json(manifest_path, manifest)

@@ -1,8 +1,21 @@
-# Kỹ thuật COde research v4
+# Kỹ thuật COde research v5 (package 0.5.1)
 
 Tài liệu giải thích code hiện có trong `clindistill/research`, cấu hình `configs/code/research.json`.
 Đây là implementation **Stage 1** của plan; không gọi frozen-feature training là full encoder fine-tuning.
 Luồng thao tác ngắn ở [README](../README.md).
+Hướng dẫn thực thi từng phiên và đóng gói wheel ở [KAGGLE_RUNBOOK.md](KAGGLE_RUNBOOK.md).
+
+## 0. Bổ sung sau research review
+
+- `research.json`: 66 fits; thêm label smoothing (0.1), correctness-only KD và visual-support-only KD.
+- `research_controls.json`: 81 fits; thêm single/mean MIL, demographics-only Teacher, shuffled-clinical Teacher và visual control cùng kiến trúc MM nhưng mask toàn bộ clinical.
+- Clinical shuffle là hoán vị khác patient group bên trong tập train của lần fit; clinical/age/gender/present được chuyển cùng nhau. Validation/test giữ nguyên, không lấy context ngoài fold để train.
+- Single-image dùng ảnh hợp lệ đầu tiên theo cùng filename policy; mean pooling tôn trọng padding mask. Các đối chứng giữ nguyên cohort/split/feature encoders.
+- `weight_diagnostics.json` báo mean, zero fraction và effective cases theo lớp/bốn nhóm Teacher. `teacher_strata.json` đánh giá các model theo các nhóm này; không xem disagreement là ground truth visual sufficiency.
+- Báo thêm per-class precision/F1; primary contrasts có MM KD−Visual KD, ablation contrasts được gắn nhãn riêng. Tất cả CI hiện là mô tả, chưa hiệu chỉnh multiplicity.
+- Cache/study/report truyền nguyên trạng pending_reviews và annotation_note. Đăng ký test bằng `freeze_test_protocol` trước khi thêm shard test; hash config/checkpoints/source không được đổi sau đó.
+- Bank schema5 có dependency lock và kiểm tra mọi module của wheel khớp source. Kaggle import từ wheel đã cài, không ưu tiên thư mục source. Bank cũ cần tạo lại, cache builder mới dùng research_features_v3 trên cùng prepared split.
+- Chưa có full pretrained CODe run hay expert review mới. Các thay đổi này tạo công cụ kiểm nghiệm giả thuyết, không tự chứng minh công thức reliability tốt hơn.
 
 ## 1. Bài toán và split
 
@@ -133,13 +146,13 @@ Không cam kết bitwise giống nhau khi đổi GPU/PyTorch; CPU epoch-resume �
 
 ## 8. Đánh giá và xuất Student
 
-9 hệ thống ×3seeds =27 full fits;30 OOF fits bổ sung. Report mean/std của các seed đã đăng ký,
+12 hệ thống ×3seeds =36 full fits;30 OOF fits bổ sung. Report mean/std của các seed đã đăng ký,
 không chọn seed có test tốt nhất. Per-class recall/AUROC, macro-F1, accuracy, Brier, ECE10bins,
 confusion matrix, risk–coverage, case/error/subgroup analysis.
 
 Group bootstrap resample split_group, giữ các visit liên quan đi cùng nhau.
 Paired bootstrap so sánh đúng cùng cases/seeds; CI điều kiện trên mô hình đã fit, không phải CI cho retraining.
-Bốn contrasts: MM−Visual Teacher, Reliability−NoKD, Reliability−VanillaMM, Reliability−Confidence.
+Năm primary contrasts: MM−Visual Teacher, MM KD−Visual KD, Reliability−NoKD, Reliability−VanillaMM, Reliability−Confidence.
 CI hiện chưa hiệu chỉnh nhiều phép so sánh: diễn giải mô tả, không tự gọi significance xác nhận.
 
 Test mặc định khóa; notebook03 cần completed study và test_review_record mô tả protocol đã cố định/giới hạn còn lại.

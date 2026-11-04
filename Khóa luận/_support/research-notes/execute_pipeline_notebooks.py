@@ -13,7 +13,7 @@ ROOT=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT))
 from clindistill.artifacts import code_hash, file_hash, write_json
 
-output=ROOT/'_support/smoke_runs/research_v4'; output.mkdir(parents=True,exist_ok=True)
+output=ROOT/'_support/smoke_runs/research_v5'; output.mkdir(parents=True,exist_ok=True)
 notebooks={}
 for path in sorted(ROOT.glob('COde_0*.ipynb')):
     doc=nbformat.read(path,as_version=4); nbformat.validate(doc)
@@ -35,7 +35,9 @@ info={'status':'passed' if passed else 'failed','tests':int(count.group(1)) if c
       'python':sys.version.split()[0],
       'packages':{p:version(p) for p in ('torch','torchvision','transformers','huggingface-hub')},
       'data':'synthetic visits/features; tiny random local foundation models; no patient data',
-      'coverage':['notebook02 Run All','group OOF','KD gradients','feature checksums','epoch resume',
+      'coverage':['notebook02 Run All','group OOF','KD component controls','clinical/MIL controls',
+                  'Teacher disagreement/weight strata','immutable test protocol','isolated installed-wheel activation',
+                  'KD gradients','feature checksums','epoch resume',
                   'validation evaluation','image-only export/inference','legacy regressions'],
       'limitations':['No gated pretrained DINO download or full COde training in this verification.',
                      'No Kaggle GPU performance claim; actual bank rehearsal remains notebook00.']}
