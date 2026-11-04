@@ -1,5 +1,13 @@
 # Kiểm chứng implementation v5 — 02/11/2026
 
+## Bổ sung 04/11/2026: SHA1-prefixed Qwen photos và coverage
+
+- **62 tests qua** trên môi trường pinned Transformers4.57.1/hub0.36.2 đã nêu. Sáu tests mới kiểm tra SHA1 filename mapping, photo/X-ray trùng basename, original SHA256, coverage/supplement, idempotence, path/user-directory protection và encoder features giống hệt qua canonical filesystem view.
+- Kiểm tra filesystem trên Windows dùng hardlinks khi thiếu quyền symlink. Kaggle dùng symlinks; chưa trực tiếp xác nhận phiên Kaggle chạy adapter này. Các tiny encoder outputs giống hệt không thay thế pretrained experiments.
+- Đối chiếu được cả 10 filename mẫu và 2 references cùng basename do người dùng cung cấp với SHA1 canonical path. Project wheel/modules và feature builder không đổi; adapter thao tác layout filesystem, không monkeypatch model/data functions hoặc sửa bank manifest. Không cần tải lại weights.
+- Tạo supplement 1.417 ảnh (~22,5 MB): số references của photo policy max8 không nằm trong union cls JSON paper là 1.020 train/211 validation/186 test. Mọi ảnh trong ZIP đã so SHA256 với image index của prepared release. Đây không phải số ảnh thiếu đã kiểm kê trực tiếp trên Kaggle.
+- User đã báo notebook00 hoàn thành. Chưa xác nhận trích features đầy đủ hoặc train full ClinDistill trên Kaggle. Pending clinical/annotation/near-duplicate reviews vẫn giữ nguyên.
+
 ## Bổ sung 03/11/2026: online CPU → Pro6000 offline
 
 - **56 tests qua** với Transformers4.57.1/huggingface-hub0.36.2 trên môi trường local đã nêu. Tám tests mới phân biệt network/Secret access/empty token, không lộ token trong traceback, kiểm tra môi trường và chuẩn bị bank CPU cho CUDA target.

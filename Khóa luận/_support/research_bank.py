@@ -150,7 +150,7 @@ def source_files(root):
     root = Path(root)
     files = [root / 'pyproject.toml', root / 'README.md'] + sorted(root.glob('COde_0*.ipynb'))
     files += sorted((root / 'clindistill').rglob('*.py')) + sorted((root / 'configs/code').glob('*.json'))
-    files += [root / '_support' / name for name in ('research_bank.py', 'kaggle_offline.py',
+    files += [root / '_support' / name for name in ('research_bank.py', 'image_layout.py', 'kaggle_offline.py',
               'backbone_extension.py', 'training_runtime.py', 'recover_amp_bundle.py', 'TECHNICAL_GUIDE.md',
               'KAGGLE_RUNBOOK.md', 'VERIFICATION.md')]
     return [p for p in files if p.is_file()]

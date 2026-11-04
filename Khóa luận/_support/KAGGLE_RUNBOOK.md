@@ -65,6 +65,28 @@ CLINICAL_BATCH_SIZE = 'auto'
 
 Notebook giữ nguyên canonical image paths của CODe, tìm ảnh theo basename trong bundle và so SHA256 với ảnh gốc trước khi chạy encoder. Thiếu ảnh, trùng basename hoặc ảnh đã bị đổi/resize sẽ dừng. Không bỏ ca thiếu ảnh rồi train trên cohort khác; khi đó gắn thêm CODe-Dataset gốc và đặt IMAGE_ROOT_OVERRIDE tới root có `Images/Photographs`.
 
+### Bundle có tên `images/<10 ký tự hash>_<tên ảnh gốc>`
+
+Notebook01 mới nhận dạng quy tắc `sha1(canonical_path)[:10] + '_' + basename`. Ví dụ photo `Images/Photographs/0127-001-01.jpg` thành `b42b6cfb7a_0127-001-01.jpg`, còn radiograph cùng basename thành `f3f5a4e7c9_0127-001-01.jpg`. Mỗi file vẫn phải có SHA256 trùng index gốc; không chỉ bỏ prefix rồi lấy file đầu tiên.
+
+Adapter tạo filesystem aliases canonical tại ancestor chung của Input/Working (trên Kaggle là `/kaggle/Images/...`), không đổi bytes hoặc chỉnh installed wheel/bank manifest. Chỉ tạo trong thư mục có marker của adapter; không ghi đè thư mục Images có sẵn của người dùng. `image_layout_report.json` nằm trong `/kaggle/working/data/COde_processed/image_layout/`, ghi ánh xạ, hash identity và coverage. Input và workspace phải có ancestor chung dưới filesystem root. Các alias được tạo lại ở mỗi session.
+
+JSON cls của paper không tham chiếu toàn bộ ảnh của cohort ClinDistill. Theo union `train-cls.json` + `test_cls.json`, thiếu 1.020 ảnh train, 211 validation và 186 test so với photo policy max8 của prepared release hiện tại. Gói `clindistill-cohort-image-supplement.zip` gồm 1.417 ảnh gốc (~22,5 MB) và manifest, không có clinical/labels/weights. Đây là so sánh references local, chưa phải xác nhận toàn bộ file thực có trên Kaggle.
+
+Để chạy với bundle Qwen đã upload:
+
+1. Import notebook01 Features Only mới, gắn **bank00 đã hoàn thành + addon đã có + Qwen assets**.
+2. Giải nén supplement, upload `images/` và `code_image_supplement.json` thành một dataset **private**, gắn thêm vào notebook01. Notebook tự tìm manifest và đối chiếu release_id; không cần thay dataset ảnh lớn hoặc chạy lại notebook00.
+3. Chọn Pro6000, Internet OFF, giữ auto batch/paths và Save & Run All. Chờ `IMAGE LAYOUT READY` rồi các encoder chạy.
+
+Nếu cohort đang yêu cầu còn ảnh thiếu/sai bytes, adapter dừng trước khi trích features, liệt kê `missing_required` trong coverage report. Không giảm cohort hoặc gộp photo với X-ray để chạy tiếp. Test feature extraction vẫn do wheel kiểm tra frozen protocol; adapter không đọc test labels hoặc chạy model trên test.
+
+Tạo lại supplement trên máy từ root repo:
+
+```powershell
+py -3.14 "Khóa luận/_support/research-notes/package_image_supplement.py" --prepared-root "Data/COde_processed/code_v1" --original-root "E:/Hoc Tap/Data/COde-Dataset" --image-index-archive "Khóa luận/_support/dist/code_v1_prepared.zip" --output "Khóa luận/_support/dist/clindistill-cohort-image-supplement.zip"
+```
+
 ### Cấu hình hiệu năng
 
 **Khi Kaggle báo `Internet cannot be enabled for this competition with the current accelerator`:** dừng session Pro6000 của notebook00, chọn Accelerator=None, bật Internet và khởi động session mới. Chỉ notebook00 cần mạng để đọc Secrets/tải wheels/weights. Notebook01/02 dùng Pro6000 offline sau khi bank đã lưu.

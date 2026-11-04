@@ -8,6 +8,8 @@ import textwrap
 ROOT = Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('research_bootstrap', ROOT / '_support/research_bank.py')
 bank = importlib.util.module_from_spec(spec); spec.loader.exec_module(bank)
+layout_spec = importlib.util.spec_from_file_location('image_layout_builder', ROOT / '_support/image_layout.py')
+layout = importlib.util.module_from_spec(layout_spec); layout_spec.loader.exec_module(layout)
 
 
 def load(prefix):
@@ -155,10 +157,34 @@ else:
             Path('/kaggle/working/data/COde_processed/research_features_v3') if Path('/kaggle').exists()
             else PROJECT_ROOT.parent / 'Data/COde_processed/research_features_v3')
         test_protocol = read_json(TEST_PROTOCOL_PATH) if TEST_PROTOCOL_PATH else None
+        VERIFIED_IMAGE_LAYOUT_HELPER
+        if (prepared / 'image_index.json').is_file():
+            from clindistill.artifacts import verify_release
+            from clindistill.data import load_records, deterministic_paths
+            image_index = read_json(prepared / 'image_index.json')
+            if image_index['release_id'] != read_json(prepared / 'release.json')['release_id']:
+                raise ValueError('Image index belongs to another prepared release.')
+            extra_roots = research_find(lambda p,d,f: 'code_image_supplement.json' in f)
+            for extra in extra_roots:
+                if read_json(extra / 'code_image_supplement.json')['release_id'] != image_index['release_id']:
+                    raise ValueError('Image supplement belongs to another release.')
+            required = None
+            if 'test' not in PREPARE_SPLITS:
+                verify_release(prepared, splits=PREPARE_SPLITS)
+                required = {p for split in PREPARE_SPLITS
+                    for row in load_records(prepared, split, 'photo_attention')
+                    for p in deterministic_paths(row['photo_paths'], cfg['max_photos'])}
+            # This creates byte-verified filesystem aliases only. The installed wheel
+            # still enforces the locked-test protocol before extracting any features.
+            images = verified_image_view([images, *extra_roots], image_index['images'],
+                                         destination.parent / 'image_layout', required_paths=required)
         manifest = prepare_features(prepared, images, models, destination, cfg, splits=PREPARE_SPLITS, test_protocol=test_protocol)
         print('Research cache:', destination, '\\nDimensions:', manifest['dimensions'], '\\nSplits:', manifest['splits'])
         print('Save Version and attach this Output to notebook02. Runtime: feature_runtime.json')
     ''')
+    source = ''.join(nb['cells'][48]['source']).replace('VERIFIED_IMAGE_LAYOUT_HELPER',
+        inspect.getsource(layout.verified_image_view).strip())
+    put(nb, 48, source)
     put(nb, 47, '''
         ## 15. Frozen DINOv3 / BGE-M3 features v3
 
