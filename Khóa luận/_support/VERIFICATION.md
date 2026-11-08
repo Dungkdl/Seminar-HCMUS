@@ -1,5 +1,16 @@
 # Kiểm chứng implementation v5 — 02/11/2026
 
+## Bổ sung 08/11/2026: regression clinical và output Kaggle notebook01
+
+- **65 tests qua** trong môi trường pinned Python3.14.2/torch2.11.0+cu128/torchvision0.26.0+cu128, Transformers4.57.1/hub0.36.2 trên Windows. Năm notebook qua nbformat/AST với outputs sạch; đây là bộ kiểm thử phần mềm local.
+- Bổ sung ba regression tests dùng synthetic context có text, tuổi/giới khác 0 và các trường hợp thiếu dữ liệu. Full phải giữ nguyên context/cờ hiện diện; demographics-only chỉ xóa text; masked phải xóa cả hai và tắt cờ. Các chế độ không được sửa cache nguồn.
+- Kiểm tra đường `dataset_for → collate_visits → forward_batch`: thay riêng text hoặc demographics có thể đổi logits của MM Teacher ở cả gated/concat fusion; masked control không phản ứng với các giá trị đã bị che. Student không nhận context, không đổi logits khi context thay đổi và từ chối clinical input trực tiếp. Đây là kiểm chứng phần mềm với head ngẫu nhiên, không phải bằng chứng clinical cải thiện chất lượng pretrained model.
+- Mutation check trong bản sao ignored: đảo `clinical_mode == 'masked'` thành `!= 'masked'`. Bộ 62 tests cũ vẫn qua; hai regression tests mới thất bại với 14 subtest failures. Source/model/data builder thực không đổi; project module hash vẫn `d4e1c107c9bbaf3219ed72652115426ef9ff88a79659761f444fd8005b843ae0`. Không yêu cầu tạo lại bank00 hoặc features01.
+- Đã đọc notebook có output `code-01-features-only-v051.ipynb` do người dùng tải về (artifact giữ ngoài Git). Papermill ghi phiên chạy 04/11/2026 không có exception, khoảng 63,2 phút; code cells khớp Features Only hiện tại. Torch runtime ghi CUDA13.0/torch2.11.0+cu130 và RTX PRO6000 94,97 GiB, dù metadata Kaggle có trường `isGpuEnabled=false` và TensorFlow có cảnh báo driver.
+- Log xác nhận layout ánh xạ 35.385 ảnh byte-verified và các encoder xử lý đủ 28.667 ảnh của train/validation. Cache được báo có 4.225 train/917 validation; dimensions student1536/teacher2048/ResNet2048/Swin1024/clinical1024, không có text bị cắt. Đây là bằng chứng từ log thực; chưa tải các `.npz`/manifest để đối chiếu checksum độc lập, chưa có full training hoặc test evaluation.
+- Runtime ghi batch DINO-B/ResNet256, DINO-L/Swin128, clinical128, workers8. Các images/s và peak VRAM trong log là telemetry của phiên này, chưa phải benchmark có kiểm soát hoặc chứng minh GPU đã tối ưu.
+- Pip báo dependency conflicts, trong đó Torch yêu cầu `setuptools<82` nhưng bank có84.2.1; các xung đột fsspec/HF với thư viện Kaggle khác cũng được ghi nhận. Notebook01 vẫn hoàn thành; regression tests lần này không giải quyết dependency compatibility. Review nhãn/clinical timing/near-duplicates vẫn chưa xác nhận.
+
 ## Bổ sung 04/11/2026: SHA1-prefixed Qwen photos và coverage
 
 - **62 tests qua** trên môi trường pinned Transformers4.57.1/hub0.36.2 đã nêu. Sáu tests mới kiểm tra SHA1 filename mapping, photo/X-ray trùng basename, original SHA256, coverage/supplement, idempotence, path/user-directory protection và encoder features giống hệt qua canonical filesystem view.
