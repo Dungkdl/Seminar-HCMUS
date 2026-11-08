@@ -27,7 +27,7 @@ Repo lưu mã nguồn, notebook nghiên cứu không có output, log notebook t�
 
 Đặt dữ liệu có quyền sử dụng tại `Data/COde-Dataset (1)/` cạnh thư mục `Khóa luận/`, gồm `complete_dataset.csv` và `Images/`, hoặc dùng biến đường dẫn override trong notebook. Notebook 01 tạo prepared release. Giữ dữ liệu trên Kaggle trong phạm vi truy cập phù hợp dữ liệu gốc.
 
-Sau khi có prepared release `Data/COde_processed/code_v1/`, chạy `Khóa luận/_support/research-notes/package_kaggle.py` để tạo source ZIP và prepared ZIP tại `_support/dist/`. Notebook 00 có thể build project wheel từ source nếu chưa có wheel; môi trường chuẩn bị cần setuptools và wheel.
+Chạy `Khóa luận/_support/research-notes/package_kaggle.py` để tạo source ZIP và project wheel tại `_support/dist/`, chưa cần có dữ liệu. Khi muốn thêm prepared ZIP, truyền `--prepared-root` tới release `code_v1`. Notebook 00 chuẩn bị dependency wheels và pretrained weights trên Linux; môi trường đóng gói cần setuptools và wheel.
 
 ## Kiểm tra mã nguồn
 
@@ -43,4 +43,4 @@ Lệnh cài trên dùng cho môi trường có Internet. Với GPU chặn Intern
 
 Tests dùng dữ liệu tổng hợp. Smoke tại local chỉ xác nhận pipeline; chưa phải kết quả train đầy đủ trên RTX 6000/Kaggle và chưa chứng minh hiệu quả nghiên cứu.
 
-Bản research v4 thực hiện Stage 1 frozen DINOv3-B/L + BGE-M3, gated MIL/fusion và group-OOF KD. Xem [plan](CODe_Research_Implementation_Plan.md). Chưa có full COde DINO results hoặc Stage 2/3 encoder fine-tuning. Bundle/cache BiomedBERT cũ không thay cho bank/features mới.
+Bản research v5 (package 0.5.1) thực hiện Stage 1 frozen DINOv3-B/L + BGE-M3, gated MIL/fusion và group-OOF KD, có đối chứng thành phần KD và clinical/MIL. Xem [hướng dẫn wheel offline trên Kaggle](Khóa%20luận/_support/KAGGLE_RUNBOOK.md) và [plan](CODe_Research_Implementation_Plan.md). Chưa có full COde DINO results hoặc Stage 2/3 encoder fine-tuning. Bank v5/source0.5.1/cache v3 cần được tạo bằng source mới; giữ nguyên prepared split nếu đã có.

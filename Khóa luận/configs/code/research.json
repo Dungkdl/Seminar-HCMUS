@@ -1,5 +1,5 @@
 {
-  "run_name": "code_research_v1",
+  "run_name": "code_research_v3",
   "seeds": [
     2026,
     2027,
@@ -27,7 +27,10 @@
     "kd_visual",
     "kd_multimodal",
     "kd_confidence",
-    "kd_reliability"
+    "kd_reliability",
+    "student_label_smoothing",
+    "kd_correctness",
+    "kd_visual_support"
   ],
   "bootstrap_repetitions": 1000,
   "debug": false,
@@ -40,8 +43,13 @@
   "language": "en",
   "clinical_temporal_verified": false,
   "image_size": 224,
-  "image_batch_size": 8,
+  "image_batch_size": "auto",
   "student_model": "facebook/dinov3-vitb16-pretrain-lvd1689m",
   "teacher_model": "facebook/dinov3-vitl16-pretrain-lvd1689m",
-  "clinical_model": "BAAI/bge-m3"
+  "clinical_model": "BAAI/bge-m3",
+  "label_smoothing": 0.1,
+  "image_workers": "auto",
+  "clinical_batch_size": "auto",
+  "evaluation_batch_size": 256,
+  "resident_features": true
 }

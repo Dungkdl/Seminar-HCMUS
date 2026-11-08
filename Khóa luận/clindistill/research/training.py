@@ -21,18 +21,33 @@ from ..metrics import classification_metrics
 from .data import FeatureStore, VisitDataset, collate_visits
 from .losses import reliability_weights, weighted_kd, per_case_kl
 from .models import VisitClassifier
+from .analysis import teacher_strata, weight_diagnostics
 
 METHODS = ('resnet50_mil', 'swin_b_mil', 'student_no_kd', 'kd_visual',
-           'kd_multimodal', 'kd_confidence', 'kd_reliability', 'kd_feature')
+           'kd_multimodal', 'kd_confidence', 'kd_reliability', 'kd_feature',
+           'student_label_smoothing', 'kd_correctness', 'kd_visual_support',
+           'student_mean', 'student_single', 'teacher_demographics',
+           'teacher_shuffled', 'teacher_visual_control')
+KD_WEIGHT_KEYS = {'kd_confidence': 'confidence', 'kd_correctness': 'correctness',
+                  'kd_visual_support': 'support_weight', 'kd_reliability': 'reliability',
+                  'kd_feature': 'reliability'}
 PRIMARY_COMPARISONS = [('teacher_multimodal', 'teacher_visual'),
+    ('kd_multimodal', 'kd_visual'),
     ('kd_reliability', 'student_no_kd'), ('kd_reliability', 'kd_multimodal'),
     ('kd_reliability', 'kd_confidence')]
+ABLATION_COMPARISONS = [('kd_reliability', 'student_label_smoothing'),
+    ('kd_reliability', 'kd_correctness'), ('kd_reliability', 'kd_visual_support'),
+    ('teacher_multimodal', 'teacher_visual_control'), ('teacher_multimodal', 'teacher_demographics'),
+    ('teacher_multimodal', 'teacher_shuffled'), ('student_no_kd', 'student_single'),
+    ('student_no_kd', 'student_mean')]
 
 
 def validate_config(config):
     for name in ('folds', 'epochs', 'patience', 'batch_size', 'accumulation_steps', 'feature_dim'):
         if not isinstance(config[name], int) or config[name] < 1:
             raise ValueError(f'{name} must be a positive integer.')
+    if not isinstance(config.get('evaluation_batch_size', 1), int) or config.get('evaluation_batch_size', 1) < 1:
+        raise ValueError('evaluation_batch_size must be a positive integer.')
     if config['folds'] < 2 or config['encoder_training'] != 'frozen_features':
         raise ValueError('Need >=2 group folds and the frozen_features protocol.')
     if not config['seeds'] or len(set(config['seeds'])) != len(config['seeds']):
@@ -41,6 +56,8 @@ def validate_config(config):
         raise ValueError('Unknown research method.')
     if len(set(config['methods'])) != len(config['methods']):
         raise ValueError('Duplicate research methods.')
+    if not 0 <= config.get('label_smoothing', 0.1) < 1:
+        raise ValueError('Invalid label smoothing.')
     for name in ('temperature', 'gate_temperature', 'learning_rate'):
         if not math.isfinite(config[name]) or config[name] <= 0:
             raise ValueError(f'Invalid {name}.')
@@ -77,7 +94,7 @@ def grouped_folds(labels, groups, folds, seed):
 
 
 def model_spec(store, config, name):
-    role = ('multimodal_teacher' if name == 'teacher_multimodal' else
+    role = ('multimodal_teacher' if name.startswith('teacher_') and name != 'teacher_visual' else
             'visual_teacher' if name == 'teacher_visual' else 'student')
     key = ('teacher' if name.startswith('teacher_') else
            name.removesuffix('_mil') if name in {'resnet50_mil', 'swin_b_mil'} else 'student')
@@ -85,24 +102,74 @@ def model_spec(store, config, name):
             'width': config['feature_dim'], 'dropout': config['dropout'], 'role': role,
             'clinical_dim': store.metadata['dimensions']['clinical'] if role == 'multimodal_teacher' else 0,
             'fusion': config.get('fusion', 'gated'),
+            'pooling': {'student_mean': 'mean', 'student_single': 'single'}.get(name, 'attention'),
             'alignment_dim': store.metadata['dimensions']['teacher'] if name == 'kd_feature' else 0}, key
 
 
 def forward_batch(model, batch, device):
-    args = {key: batch[key].to(device) for key in ('clinical', 'demographics', 'clinical_present') if key in batch}
-    return model(batch['visual'].to(device), batch['mask'].to(device), **args)
+    args = {key: batch[key].to(device, non_blocking=True) for key in ('clinical', 'demographics', 'clinical_present') if key in batch}
+    return model(batch['visual'].to(device, non_blocking=True), batch['mask'].to(device, non_blocking=True), **args)
 
 
-def loader(dataset, config, *, shuffle=False, epoch=0, seed=0):
-    return DataLoader(dataset, batch_size=config['batch_size'], collate_fn=collate_visits,
-                      shuffle=shuffle, num_workers=0, generator=torch.Generator().manual_seed(seed + epoch))
+def dataset_for(store, split, visual_key, role, name, seed=0, indices=None):
+    mode = {'teacher_demographics': 'demographics', 'teacher_visual_control': 'masked',
+            'teacher_shuffled': 'shuffled' if split == 'train' else 'full'}.get(name, 'full')
+    return VisitDataset(store, split, visual_key, role=role, indices=indices,
+                        clinical_mode=mode, shuffle_seed=seed)
+
+
+class ResidentVisitLoader:
+    """Keep small frozen-feature cohorts on GPU, preserving DataLoader's visit order."""
+    def __init__(self, dataset, batch_size, shuffle, generator, device='cuda'):
+        self.dataset, self.device = dataset, torch.device(device)
+        if not hasattr(dataset, '_resident_batches'):
+            full = collate_visits([dataset[i] for i in range(len(dataset))])
+            # IDs and global indices remain on CPU for audited OOF target lookup.
+            full = {k: v.to(self.device) if torch.is_tensor(v) and k != 'indices' else v for k, v in full.items()}
+            dataset._resident_batches = full
+        self.full = dataset._resident_batches
+        self.order = DataLoader(range(len(dataset)), batch_size=batch_size, shuffle=shuffle,
+                                generator=generator, num_workers=0)
+
+    def __len__(self):
+        return len(self.order)
+
+    def __iter__(self):
+        for offsets in self.order:
+            gpu_offsets = offsets.to(self.device)
+            batch = {k: ([v[i] for i in offsets.tolist()] if k == 'ids' else
+                         v[offsets] if k == 'indices' else v[gpu_offsets]) for k, v in self.full.items()}
+            # The shape follows ordinary collation; padding cannot change the model evidence.
+            width = int(np.diff(self.dataset.values['offsets'])[self.dataset.indices[offsets.numpy()]].max())
+            batch['visual'], batch['mask'] = batch['visual'][:, :width], batch['mask'][:, :width]
+            yield batch
+
+
+def loader(dataset, config, *, shuffle=False, epoch=0, seed=0, evaluation=False, device=None):
+    size = config.get('evaluation_batch_size', config['batch_size']) if evaluation else config['batch_size']
+    generator = torch.Generator().manual_seed(seed + epoch)
+    cuda = device is not None and torch.device(device).type == 'cuda'
+    if cuda and config.get('resident_features', True):
+        data = dataset.values
+        width = data[dataset.key].shape[-1]
+        photos = int(np.diff(data['offsets'])[dataset.indices].max())
+        estimate = len(dataset) * (photos * (width * 4 + 1) + (data['clinical'].shape[-1] + 5) * 4 + 32)
+        free, _ = torch.cuda.mem_get_info()
+        if hasattr(dataset, '_resident_batches') or estimate < min(free * .2, 2 * 2**30):
+            try:
+                return ResidentVisitLoader(dataset, size, shuffle, generator)
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                print('Resident feature allocation OOM; using pinned CPU batches.', flush=True)
+    return DataLoader(dataset, batch_size=size, collate_fn=collate_visits, pin_memory=cuda,
+                      shuffle=shuffle, num_workers=0, generator=generator)
 
 
 def predict(model, dataset, config, device):
     model.eval()
     values, ids = [], []
     with torch.inference_mode():
-        for batch in loader(dataset, config):
+        for batch in loader(dataset, config, evaluation=True, device=device):
             values.append(forward_batch(model, batch, device)['logits'].float().cpu().numpy())
             ids.extend(batch['ids'])
     return np.concatenate(values), ids
@@ -166,26 +233,27 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
                     group[k] = v if k == 'step' else v.to(device)
         scheduler.load_state_dict(state['scheduler']); restore_rng(state['rng'])
         start, best, bad, history = state['epoch'], state['best'], state['bad'], state['history']
-    training = VisitDataset(store, 'train', key, role=spec['role'], indices=indices)
-    validation = VisitDataset(store, 'validation', key, role=spec['role']) if fixed_epochs is None else None
+    training = dataset_for(store, 'train', key, spec['role'], name, seed, indices)
+    validation = dataset_for(store, 'validation', key, spec['role'], name, seed) if fixed_epochs is None else None
     classes = store.metadata['class_names']
     for epoch in range(start, epochs):
         tick = time.monotonic(); model.train()
-        batches = loader(training, config, shuffle=True, epoch=epoch, seed=seed)
+        batches = loader(training, config, shuffle=True, epoch=epoch, seed=seed, device=device)
         optimizer.zero_grad(set_to_none=True)
-        total, count, running_kd = 0., 0, 0.
+        total, count, running_kd = torch.zeros((), device=device), 0, torch.zeros((), device=device)
         for step, batch in enumerate(batches):
             out = forward_batch(model, batch, device)
             labels = batch['labels'].to(device)
-            ce = F.cross_entropy(out['logits'], labels)
+            ce = F.cross_entropy(out['logits'], labels,
+                label_smoothing=config.get('label_smoothing', 0.1) if name == 'student_label_smoothing' else 0.)
             kd = ce.new_zeros(())
             if name.startswith('kd_'):
                 if targets is None:
                     raise ValueError('KD requires verified train-only OOF targets.')
                 ix = batch['indices'].numpy()
                 t = torch.from_numpy(targets['visual_logits' if name == 'kd_visual' else 'multimodal_logits'][ix]).to(device)
-                if name in {'kd_confidence', 'kd_reliability', 'kd_feature'}:
-                    weight_key = 'confidence' if name == 'kd_confidence' else 'reliability'
+                if name in KD_WEIGHT_KEYS:
+                    weight_key = KD_WEIGHT_KEYS[name]
                     raw = torch.from_numpy(targets[weight_key][ix]).to(device)
                     kd = weighted_kd(out['logits'], t, raw, float(targets[weight_key].mean()), config['temperature'])
                 else:
@@ -208,7 +276,8 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
             if (step + 1) % config['accumulation_steps'] == 0 or step + 1 == len(batches):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5., error_if_nonfinite=True)
                 optimizer.step(); optimizer.zero_grad(set_to_none=True)
-            total += float(loss.detach()) * n; running_kd += float(kd.detach()) * n; count += n
+            total += loss.detach() * n; running_kd += kd.detach() * n; count += n
+        total, running_kd = float(total), float(running_kd)
         scheduler.step()
         metrics = None
         if validation is not None:
@@ -297,19 +366,24 @@ def build_oof(store, root, config, seed, teachers):
         torch.from_numpy(values['multimodal_logits']), torch.from_numpy(data['labels']),
         epsilon=config['visual_support_epsilon'], gate_temperature=config['gate_temperature'])
     values.update({key: value.cpu().numpy() for key, value in weights.items()})
-    for key in ('confidence', 'reliability'):
-        if key == 'reliability' and not any(m in config['methods'] for m in ('kd_reliability', 'kd_feature')):
-            continue
+    for key in {KD_WEIGHT_KEYS[m] for m in config['methods'] if m in KD_WEIGHT_KEYS}:
         if values[key].mean() <= 1e-12:
             raise ValueError(f'OOF {key} weights collapse to zero. Inspect Teacher quality; no silent CE fallback.')
     temporary = path.with_suffix('.tmp')
     with temporary.open('wb') as stream:
         np.savez_compressed(stream, **values)
     temporary.replace(path)
+    keys = ('confidence', 'correctness', 'support_weight', 'reliability')
     stats = {key: {'mean_train': float(values[key].mean()), 'zero_fraction': float((values[key] <= 1e-12).mean()),
              'mean_by_class': {name: float(values[key][data['labels'] == j].mean())
                 for j, name in enumerate(store.metadata['class_names'])}}
-             for key in ('confidence', 'reliability')}
+             for key in keys}
+    strata = teacher_strata(values['visual_logits'], values['multimodal_logits'], data['labels'])
+    write_json(root / 'weight_diagnostics.json', {
+        'interpretation': 'OOF model disagreement, not ground truth visual sufficiency or clinical dependency.',
+        'weights': weight_diagnostics({k: values[k] for k in keys}, data['labels'], store.metadata['class_names'], strata)})
+    pd.DataFrame({'case_id': data['ids'], 'split_group': data['groups'], 'label': data['labels'],
+                  **{k: values[k] for k in keys}, **strata}).to_csv(root / 'oof_diagnostics.csv', index=False)
     manifest = {'identity': identity, 'request': request, 'sha256': file_hash(path), 'folds': proof,
                 'weight_statistics': stats, 'weight_normalization': 'fixed_global_OOF_train_mean',
                 'OOF_selection': 'fixed epochs selected on independent validation; no fold-heldout selection'}
@@ -324,7 +398,8 @@ def study_plan(config):
     return {'main_fits': main, 'OOF_fits': oof, 'total_fits': main + oof,
             'encoder_training': 'frozen_features', 'seeds': config['seeds'],
             'systems': ['teacher_visual', 'teacher_multimodal'] + config['methods'],
-            'primary_comparisons': PRIMARY_COMPARISONS, 'test_opened': False}
+            'primary_comparisons': PRIMARY_COMPARISONS, 'ablation_comparisons': ABLATION_COMPARISONS,
+            'test_opened': False}
 
 
 def run_study(feature_root, study_root, config, *, require_gpu=True):
@@ -349,12 +424,27 @@ def run_study(feature_root, study_root, config, *, require_gpu=True):
     root = Path(study_root); root.mkdir(parents=True, exist_ok=True)
     protocol = {'source': code_hash(), 'features': store.identity, 'config': config, 'plan': study_plan(config),
                 'feature_root_hint': str(Path(feature_root).resolve()), 'clinical_policy': policy,
-                'release_stage': store.metadata['release_stage'], 'debug': store.metadata['debug']}
+                'release_stage': store.metadata['release_stage'], 'debug': store.metadata['debug'],
+                'pending_reviews': store.metadata.get('pending_reviews', ['Review status not supplied by cache.']),
+                'annotation_note': store.metadata.get('annotation_note', 'Recorded targets; annotation review unresolved.'),
+                'controls': {'teacher_shuffled': 'Clinical contexts permuted between groups inside TRAIN only; natural validation/test.',
+                             'teacher_visual_control': 'Same multimodal architecture, all clinical inputs masked.'}}
     # Paths are hints and may change when attaching Kaggle output in the next session.
     identity = object_hash({k: v for k, v in protocol.items() if k != 'feature_root_hint'})
     if (root / 'study.json').exists() and read_json(root / 'study.json')['identity'] != identity:
         raise ValueError('Study inputs/config/source changed. Choose a new run_name; no checkpoint mixing.')
     write_json(root / 'study.json', {'identity': identity, **protocol})
+    from .runtime import hardware
+    write_json(root / 'training_runtime.json', {'hardware': hardware(), 'optimizer_batch': config['batch_size'],
+        'accumulation_steps': config['accumulation_steps'], 'head_precision': 'float32',
+        'resident_features': config.get('resident_features', True),
+        'evaluation_batch_size': config.get('evaluation_batch_size', config['batch_size'])})
+    write_json(root / 'cohort_summary.json', {split: {
+        'visits': len(data['ids']), 'patients': len(np.unique(data['patients'])),
+        'independent_groups': len(np.unique(data['groups'])),
+        'per_class': {name: int((data['labels'] == i).sum()) for i, name in enumerate(store.metadata['class_names'])},
+        'clinical_present_fraction': float(data['clinical_present'].mean())}
+        for split, data in store.data.items()})
     print(study_plan(config), flush=True)
     results = []
     for seed in config['seeds']:
@@ -375,8 +465,8 @@ def run_study(feature_root, study_root, config, *, require_gpu=True):
             directory = root / result['name'] / f"seed_{result['seed']}"
             if not (directory / 'validation_predictions.csv').exists():
                 model, state = load_model(directory / 'best.pt')
-                logits, _ = predict(model, VisitDataset(store, 'validation', state['visual_key'],
-                    role=state['spec']['role']), config, torch.device('cpu'))
+                logits, _ = predict(model, dataset_for(store, 'validation', state['visual_key'],
+                    state['spec']['role'], result['name'], result['seed']), config, torch.device('cpu'))
                 write_predictions(directory / 'validation_predictions.csv', store.data['validation'], logits)
     rows = [{'method': r['name'], 'seed': r['seed'], 'best_epoch': r['best_epoch'],
              **{k: r['metrics'][k] for k in ('macro_f1', 'accuracy', 'macro_auroc_defined_classes', 'brier_multiclass', 'ece_10_bins')}} for r in results]

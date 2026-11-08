@@ -21,7 +21,9 @@ def reliability_weights(visual_logits, multimodal_logits, labels, *, epsilon=0.1
         support = pv.gather(1, labels.long().unsqueeze(1)).squeeze(1)
         correct = pm.argmax(-1).eq(labels)
         proposed = correct * confidence * (epsilon + (1 - epsilon) * support)
-    return {'confidence': confidence, 'reliability': proposed, 'multimodal_correct': correct, 'visual_support': support}
+    return {'confidence': confidence, 'reliability': proposed, 'multimodal_correct': correct,
+            'correctness': correct.float(), 'visual_support': support,
+            'support_weight': epsilon + (1 - epsilon) * support}
 
 
 def weighted_kd(student, teacher, raw_weight, train_mean_weight, temperature):

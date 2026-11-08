@@ -1,5 +1,7 @@
 # CODe — Kế hoạch triển khai nghiên cứu Teacher–Student hướng tới bài báo khoa học
 
+> **Cập nhật implementation 02/11/2026:** source hiện tại là research v5/package 0.5.0, thêm đối chứng thành phần KD, clinical/MIL và wheel bank v5. Profile chính có 66 fits, profile controls có 81 fits; xem [hướng dẫn Kaggle](Khóa%20luận/_support/KAGGLE_RUNBOOK.md), [cấu hình hiện hành](Khóa%20luận/configs/code/research.json) và [kiểm chứng](Khóa%20luận/_support/VERIFICATION.md). Kế hoạch và ghi nhận v4 bên dưới được giữ theo thời điểm ban đầu; chưa có full pretrained CODe results hoặc expert review mới.
+
 > **Phiên bản:** 1.0 · **Ngày:** 28/10/2026  
 > **Trạng thái:** Kế hoạch nghiên cứu và thử nghiệm, **chưa phải** phương pháp đã được xác nhận là vượt SOTA.  
 > **Dataset trọng tâm:** COde / Casangels Oro-dental Dataset (CODe).  

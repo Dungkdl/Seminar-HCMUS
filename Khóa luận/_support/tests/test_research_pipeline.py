@@ -3,6 +3,7 @@ import copy
 import contextlib
 import io
 import json
+import shutil
 from pathlib import Path
 import tempfile
 import unittest
@@ -89,7 +90,7 @@ class ResearchInvariants(unittest.TestCase):
 
     def test_primary_plan_and_clinical_label_independence(self):
         cfg = read_json(PROJECT/'configs/code/research.json')
-        self.assertEqual(study_plan(cfg)['total_fits'],57)
+        self.assertEqual(study_plan(cfg)['total_fits'],66)
         row = {'age_raw':'32','gender_raw':'Female','clinical_raw_allowlist':{
             'chief_complaint':'pain for two days','diagnosis':'secret target','examination':'diagnosis label'}}
         original = clinical_input(row,cfg['clinical_fields'])
@@ -147,7 +148,7 @@ class ResearchInvariants(unittest.TestCase):
             root=Path(d); encoders=tiny_encoders(root/'encoders')
             cache=synthetic_features(root/'features',encoders=encoders); cfg=config(); study=root/'study'
             summary=run_study(cache,study,cfg,require_gpu=False)
-            self.assertEqual(len(summary),9)
+            self.assertEqual(len(summary),2 + len(cfg['methods']))
             proof=read_json(study/'_oof/seed_2026/targets.json')
             self.assertEqual(proof['weight_normalization'],'fixed_global_OOF_train_mean')
             for fold in proof['folds']:
@@ -157,7 +158,7 @@ class ResearchInvariants(unittest.TestCase):
             run_study(cache,study,cfg,require_gpu=False)
             self.assertEqual(hashes,{p:file_hash(p) for p in hashes})
             table,_=evaluate_study(cache,study)
-            self.assertEqual(len(table),9)
+            self.assertEqual(len(table),2 + len(cfg['methods']))
             with self.assertRaisesRegex(ValueError,'Locked test'):
                 evaluate_study(cache,study,split='test')
             export=export_student(cache,study,encoders['student'],root/'export')
@@ -218,6 +219,18 @@ class FoundationPreparation(unittest.TestCase):
             self.assertEqual(before,FeatureStore(root/'cache',allow_debug=True).identity)
             self.assertEqual(original,file_hash(root/'cache/train.npz'))
             self.assertEqual(len(FeatureStore(root/'cache',splits=('train','validation','test'),allow_debug=True).data),3)
+            # The Qwen bundle has lowercase data/images and flattened basenames.
+            flat = root/'qwen/data'; (flat/'images').mkdir(parents=True)
+            hashes = {}
+            for photo in root.glob('*.jpg'):
+                shutil.copy2(photo, flat/'images'/photo.name)
+                hashes[photo.name] = file_hash(photo)
+            write_json(prepared/'image_index.json', {'release_id':'tiny-encoder-test', 'images':hashes})
+            prepare_features(prepared,flat,encoders,root/'flat-cache',cfg)
+            flat_store=FeatureStore(root/'flat-cache',allow_debug=True)
+            for split in ('train','validation'):
+                for key in ('image_paths','student','teacher','clinical'):
+                    np.testing.assert_array_equal(store.data[split][key],flat_store.data[split][key])
             changed=copy.deepcopy(cfg); changed['clinical_fields']=['age','examination']
             with self.assertRaisesRegex(ValueError,'Forbidden'):
                 prepare_features(prepared,root,encoders,root/'cache',changed)

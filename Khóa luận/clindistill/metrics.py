@@ -11,6 +11,10 @@ def classification_metrics(labels, probabilities, class_names):
     cm = confusion_matrix(y, pred, labels=classes)
     support = cm.sum(axis=1)
     recalls = np.divide(cm.diagonal(), support, out=np.zeros(len(classes), dtype=float), where=support > 0)
+    predicted = cm.sum(axis=0)
+    precisions = np.divide(cm.diagonal(), predicted, out=np.zeros(len(classes), dtype=float), where=predicted > 0)
+    f1s = np.divide(2 * precisions * recalls, precisions + recalls,
+                    out=np.zeros(len(classes), dtype=float), where=(precisions + recalls) > 0)
     aucs = {name: (float(roc_auc_score(y == c, p[:, c])) if 0 < (y == c).sum() < len(y) else None)
             for c, name in enumerate(class_names)}
     confidence, correct = p.max(axis=1), (pred == y)
@@ -23,6 +27,8 @@ def classification_metrics(labels, probabilities, class_names):
             'macro_f1': float(f1_score(y, pred, labels=classes, average='macro', zero_division=0)),
             'balanced_accuracy_observed_classes': float(recalls[support > 0].mean()),
             'per_class_support': dict(zip(class_names, map(int, support))),
+            'per_class_precision': dict(zip(class_names, map(float, precisions))),
+            'per_class_f1': dict(zip(class_names, map(float, f1s))),
             'per_class_recall': {name: float(recalls[c]) if support[c] else None for c, name in enumerate(class_names)},
             'per_class_auroc': aucs,
             'macro_auroc_defined_classes': float(np.mean([v for v in aucs.values() if v is not None])) if any(v is not None for v in aucs.values()) else None,
