@@ -25,7 +25,11 @@ PROJECT = Path(__file__).resolve().parents[2]
 def config():
     cfg = read_json(PROJECT / 'configs/code/research.json')
     cfg.update(debug=True, seeds=[2026], folds=2, epochs=4, patience=4, feature_dim=16,
-               learning_rate=0.025, batch_size=8, dropout=0.1, bootstrap_repetitions=10)
+               learning_rate=0.025, batch_size=8, dropout=0.1, bootstrap_repetitions=10,
+               export_method='kd_reliability',
+               methods=['resnet50_mil','swin_b_mil','student_no_kd','kd_visual','kd_multimodal',
+                        'kd_confidence','kd_reliability','student_label_smoothing','kd_correctness',
+                        'kd_visual_support','teacher_clinical','student_weighted_ce'])
     return cfg
 
 
@@ -90,7 +94,7 @@ class ResearchInvariants(unittest.TestCase):
 
     def test_primary_plan_and_clinical_label_independence(self):
         cfg = read_json(PROJECT/'configs/code/research.json')
-        self.assertEqual(study_plan(cfg)['total_fits'],66)
+        self.assertEqual(study_plan(cfg)['total_fits'],63)
         row = {'age_raw':'32','gender_raw':'Female','clinical_raw_allowlist':{
             'chief_complaint':'pain for two days','diagnosis':'secret target','examination':'diagnosis label'}}
         original = clinical_input(row,cfg['clinical_fields'])

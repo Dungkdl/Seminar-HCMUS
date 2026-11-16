@@ -42,8 +42,10 @@ class TrainingNotebookTests(unittest.TestCase):
         from clindistill.research.training import study_plan
         cfg=read_json(self.project/'configs/code/research.json')
         self.assertEqual(cfg['seeds'],[2026,2027,2028]); self.assertEqual(cfg['folds'],5)
-        self.assertEqual(study_plan(cfg)['total_fits'],66)
-        self.assertIn('student_no_kd',cfg['methods']); self.assertIn('kd_reliability',cfg['methods'])
+        self.assertEqual(study_plan(cfg)['total_fits'],63)
+        self.assertIn('student_no_kd',cfg['methods']); self.assertIn('kd_multimodal',cfg['methods'])
+        visual=read_json(self.project/'configs/code/research_visual.json')
+        self.assertEqual(study_plan(visual)['total_fits'],12)
         namespace={}; exec(next(c.source for c in self.notebook.cells if c.cell_type=='code'),namespace)
         self.assertTrue(namespace['RUN_TRAIN'])
         # Entry point 02 does not perform raw-data preparation or open test shards.

@@ -1,69 +1,89 @@
+"""Current frozen-feature research CLI; archived trainer requires explicit `legacy`."""
 import argparse
+import contextlib
 import json
+import sys
+
+from .artifacts import read_json
 
 
-def main():
-    parser = argparse.ArgumentParser(description='ClinDistill: preparation, Teachers, KD and evaluation')
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == 'legacy':
+        from .legacy_cli import main as legacy_main
+        previous = sys.argv
+        try:
+            sys.argv = [previous[0] + ' legacy', *argv[1:]]
+            return legacy_main()
+        finally:
+            sys.argv = previous
+    parser = argparse.ArgumentParser(description='ClinDistill selected-cohort, frozen-feature research')
     commands = parser.add_subparsers(dest='command', required=True)
-    prepare = commands.add_parser('export')
-    prepare.add_argument('--audit-dir', required=True)
-    prepare.add_argument('--destination', required=True)
-    cache = commands.add_parser('clinical-cache')
-    cache.add_argument('--release-dir', required=True)
-    cache.add_argument('--destination', required=True)
-    cache.add_argument('--encoder', default='microsoft/BiomedNLP-BiomedBERT-base-uncased-abstract-fulltext')
-    cache.add_argument('--revision', default='main')
-    cache.add_argument('--include-test', action='store_true')
-    cache.add_argument('--local-files-only', action='store_true')
-    for name in ['train', 'evaluate', 'suite']:
-        p = commands.add_parser(name)
-        p.add_argument('--release-dir', required=True)
-        p.add_argument('--image-root', required=True)
-        p.add_argument('--run-dir', required=True)
-        p.add_argument('--device', default=None)
-        p.add_argument('--clinical-cache', default=None)
-        if name in {'train', 'suite'}:
-            p.add_argument('--config', required=True)
-            p.add_argument('--resume', action='store_true')
-            if name == 'train':
-                p.add_argument('--teacher-root', default=None, help='Contains teacher_full/seed_N, teacher_v/seed_N, etc.')
-            else:
-                p.add_argument('--seeds', nargs='+', type=int, default=[2026, 2027, 2028])
-                p.add_argument('--experiments', nargs='+', default=None)
+    for name in ('plan', 'train'):
+        cmd = commands.add_parser(name)
+        cmd.add_argument('--config', required=True, help='research_visual/clinical/transfer.json, or registered full profile')
+        if name == 'train':
+            cmd.add_argument('--features', required=True)
+            cmd.add_argument('--study', required=True)
+            cmd.add_argument('--allow-cpu-debug', action='store_true')
+    cmd = commands.add_parser('features')
+    cmd.add_argument('--config', required=True)
+    cmd.add_argument('--prepared', required=True)
+    cmd.add_argument('--images', required=True)
+    cmd.add_argument('--models-json', required=True, help='JSON mapping student/teacher/clinical and optional CNN roles to local assets')
+    cmd.add_argument('--output', required=True)
+    cmd.add_argument('--splits', nargs='+', choices=['train', 'validation', 'test'], default=['train', 'validation'])
+    cmd.add_argument('--test-protocol')
+    for name in ('evaluate', 'lock-test', 'export-student'):
+        cmd = commands.add_parser(name)
+        cmd.add_argument('--features', required=True)
+        cmd.add_argument('--study', required=True)
+        if name == 'lock-test':
+            cmd.add_argument('--review-record', required=True)
+        elif name == 'evaluate':
+            cmd.add_argument('--output')
+            cmd.add_argument('--split', choices=['validation', 'test'], default='validation')
+            cmd.add_argument('--review-record')
         else:
-            p.add_argument('--split', choices=['validation', 'test'], default='validation')
-            p.add_argument('--allow-experimental-test', action='store_true')
-    args = parser.parse_args()
-    if args.command == 'export':
-        from .artifacts import publish_release
-        result = publish_release(args.audit_dir, args.destination)
-    elif args.command == 'clinical-cache':
-        from .clinical import prepare_clinical_cache
-        result = prepare_clinical_cache(args.release_dir, args.destination, encoder=args.encoder,
-            revision=args.revision, splits=('train', 'validation', 'test') if args.include_test else ('train', 'validation'),
-            local_files_only=args.local_files_only)
-    elif args.command in {'train', 'suite'}:
-        from pathlib import Path
-        from .config import TrainConfig
-        from .engine import fit
-        config = TrainConfig.load(args.config)
-        if args.command == 'suite':
-            from .suite import run_suite
-            result = run_suite(args.release_dir, args.image_root, args.run_dir, config,
-                clinical_cache=args.clinical_cache, selected=args.experiments,
-                seeds=args.seeds, resume=args.resume, device=args.device)
+            cmd.add_argument('--encoder', required=True)
+            cmd.add_argument('--output', required=True)
+            cmd.add_argument('--method')
+    cmd = commands.add_parser('review-status')
+    cmd.add_argument('--prepared', required=True)
+    cmd.add_argument('--audit')
+    args = parser.parse_args(argv)
+    if args.command in {'plan', 'train'}:
+        from .research.training import validate_config, study_plan, run_study
+        config = read_json(args.config)
+        validate_config(config)
+        if args.command == 'plan':
+            result = study_plan(config)
         else:
-            teachers = ({g: Path(args.teacher_root) / f'teacher_{g}' / f'seed_{config.seed}'
-                         for g in ['clinical', 'full', 'v', 'h']} if args.teacher_root else None)
-            result = fit(args.release_dir, args.image_root, args.run_dir, config,
-                         resume=args.resume, device=args.device, clinical_cache=args.clinical_cache,
-                         teacher_dirs=teachers)
+            if args.allow_cpu_debug and not config.get('debug'):
+                parser.error('--allow-cpu-debug requires a synthetic/debug configuration.')
+            with contextlib.redirect_stdout(sys.stderr):
+                table = run_study(args.features, args.study, config, require_gpu=not args.allow_cpu_debug)
+            result = table.astype(object).where(table.notna(), None).to_dict('records')
+    elif args.command == 'features':
+        from .research.data import prepare_features
+        with contextlib.redirect_stdout(sys.stderr):
+            result = prepare_features(args.prepared, args.images, read_json(args.models_json), args.output,
+                read_json(args.config), splits=args.splits,
+                test_protocol=read_json(args.test_protocol) if args.test_protocol else None)
+    elif args.command == 'review-status':
+        from .research.review import review_status
+        result = review_status(args.prepared, args.audit)
     else:
-        from .engine import evaluate_checkpoint
-        result = evaluate_checkpoint(args.release_dir, args.image_root, args.run_dir, split=args.split,
-                                     allow_experimental_test=args.allow_experimental_test, device=args.device,
-                                     clinical_cache=args.clinical_cache)
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+        from .research.reporting import evaluate_study, freeze_test_protocol, export_student
+        if args.command == 'lock-test':
+            result = freeze_test_protocol(args.features, args.study, args.review_record)
+        elif args.command == 'export-student':
+            result = export_student(args.features, args.study, args.encoder, args.output, method=args.method)
+        else:
+            table, _ = evaluate_study(args.features, args.study, args.output,
+                split=args.split, test_review_record=args.review_record)
+            result = table.astype(object).where(table.notna(), None).to_dict('records')
+    print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
 
 
 if __name__ == '__main__':

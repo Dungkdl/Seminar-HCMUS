@@ -1,176 +1,64 @@
-# Kỹ thuật COde research v5 (package 0.5.1)
+# Kỹ thuật ClinDistill 0.6.0 — frozen-feature, selected-cohort classification
 
-Tài liệu giải thích code hiện có trong `clindistill/research`, cấu hình `configs/code/research.json`.
-Đây là implementation **Stage 1** của plan; không gọi frozen-feature training là full encoder fine-tuning.
-Luồng thao tác ngắn ở [README](../README.md).
-Hướng dẫn thực thi từng phiên và đóng gói wheel ở [KAGGLE_RUNBOOK.md](KAGGLE_RUNBOOK.md).
+Code hiện hành ở `clindistill/research/`. [README](../README.md), [Kaggle runbook](KAGGLE_RUNBOOK.md), [review protocol](REVIEW_PROTOCOL.md), [protocol nghiên cứu](RESEARCH_PROTOCOL.md).
 
-## 0. Bổ sung sau research review
+## Hợp đồng dữ liệu và tác vụ
 
-- `research.json`: 66 fits; thêm label smoothing (0.1), correctness-only KD và visual-support-only KD.
-- `research_controls.json`: 81 fits; thêm single/mean MIL, demographics-only Teacher, shuffled-clinical Teacher và visual control cùng kiến trúc MM nhưng mask toàn bộ clinical.
-- Clinical shuffle là hoán vị khác patient group bên trong tập train của lần fit; clinical/age/gender/present được chuyển cùng nhau. Validation/test giữ nguyên, không lấy context ngoài fold để train.
-- Single-image dùng ảnh hợp lệ đầu tiên theo cùng filename policy; mean pooling tôn trọng padding mask. Các đối chứng giữ nguyên cohort/split/feature encoders.
-- `weight_diagnostics.json` báo mean, zero fraction và effective cases theo lớp/bốn nhóm Teacher. `teacher_strata.json` đánh giá các model theo các nhóm này; không xem disagreement là ground truth visual sufficiency.
-- Báo thêm per-class precision/F1; primary contrasts có MM KD−Visual KD, ablation contrasts được gắn nhãn riêng. Tất cả CI hiện là mô tả, chưa hiệu chỉnh multiplicity.
-- Cache/study/report truyền nguyên trạng pending_reviews và annotation_note. Đăng ký test bằng `freeze_test_protocol` trước khi thêm shard test; hash config/checkpoints/source không được đổi sau đó.
-- Bank schema5 có dependency lock và kiểm tra mọi module của wheel khớp source. Kaggle import từ wheel đã cài, không ưu tiên thư mục source. Bank cũ cần tạo lại, cache builder mới dùng research_features_v3 trên cùng prepared split.
-- Chưa có full pretrained CODe run hay expert review mới. Các thay đổi này tạo công cụ kiểm nghiệm giả thuyết, không tự chứng minh công thức reliability tốt hơn.
+Một mẫu = một lượt khám có ≥1 photo và đúng một recorded mapped target trong sáu lớp. Các nhãn khác có thể cùng tồn tại; nhãn vắng không được xác nhận âm tính. Không có healthy class. Cohort photo hiện tại4.225/917/910 train/validation/test, chưa được review chuyên môn đầy đủ.
 
-## 1. Bài toán và split
+`split_group` là connected component patient IDs và ảnh trùng byte/pixel. Chia theo nhóm và bootstrap nhóm; pending near-duplicate review được truyền từ prepared release sang cache/study/report. Không thay split trong training. `FeatureStore` mở train/validation; test cần entry point/protocol riêng.
 
-Một sample = một lượt khám có ≥1 photo và đúng một target được ghi nhận trong sáu target.
-Nhãn này chưa chứng minh bệnh nhân chỉ có một bệnh. Không có healthy class; multi-label chưa được duyệt.
-Cohort hiện tại: 4.225 train, 917 validation, 910 test. Các hệ thống dùng đúng cùng cohort/split.
+`research/data.py` giữ nguyên so với0.5.1 để cache v3 đã tạo có thể tiếp tục dùng. Schema feature manifest vẫn4; tên thư mục cache v3 và schema4 là hai khái niệm khác nhau. Checksum và builder hash vẫn bắt buộc. `features.json` cố định pretrained assets/preprocessing cho toàn bộ profile, kể cả CNN controls.
 
-Giữ `code_v1/release.json` và manifests; không chạy lại chia tập trong notebook02.
-`split_group` là connected component bệnh nhân và ảnh trùng byte/pixel, mạnh hơn chỉ group theo patient_id.
-Train chỉ mở cache train/validation. Test có entry point riêng và cần ghi protocol đã khóa.
-Metadata audit của toàn dataset không được dùng để tối ưu model theo test.
+## Frozen features
 
-## 2. Feature preparation nằm ở notebook01
+- EXIF → RGB → resize/pad giữ tỷ lệ, bilinear224×224; normalize theo DINO processor hoặc ImageNet cho CNN. Tối đa8 photo, chọn theo vị trí filename cách đều; không phải canonical clinical views.
+- DINO-B hidden768, DINO-L hidden1024; concat CLS + mean patch, bỏ register tokens, L2 normalize →1536/2048 dimensions. BF16/FP16 encoder trên GPU, cache image vectors float16, head float32.
+- ResNet50/Swin-B trước head →2048/1024 dimensions, L2 normalize. Pretraining recipes khác nhau; so sánh backbone không cô lập riêng kiến trúc.
+- BGE-M3 dense normalized CLS1024, text tối đa256 tokens, báo truncation. Text frozen/eval, cache float32. Clinical thiếu → vector0; demographics5 chiều: age/120, age-present, male/female/unknown.
+- Không fit scalers/PCA trên test; không đưa labels vào foundation encoders. Frozen protocol không có augmentation ảnh ngẫu nhiên.
+- Chunk checksums bảo vệ resume; batching/worker có thể đổi cho throughput, không đổi optimizer batch/split/policy.
 
-`research/data.py::prepare_features` xác minh release và local weights, rồi trích xuất frozen features.
-Không đưa labels vào foundation encoders, không fit scaler/PCA trên validation/test.
+## Clinical và các model
 
-- Ảnh: EXIF → RGB → resize/pad giữ tỷ lệ, bilinear, 224×224; normalize theo processor DINO hoặc ImageNet cho CNN.
-- Chọn tối đa8 photo/ca bằng vị trí filename cách đều, cố định cho full fit/OOF/Student/Teacher.
-  Đây không phải bộ canonical dental views được chuyên gia đánh dấu.
-- DINO-B hidden768, DINO-L hidden1024. Descriptor = concat(CLS, mean patch tokens),
-  **bỏ register tokens**, L2 normalize → Student1536 chiều, Teacher2048 chiều.
-- ResNet50 trước `fc`:2048 chiều; Swin-B trước `head`:1024 chiều; L2 normalize.
-- BGE-M3 dense = **normalized CLS1024**, không dùng BiomedBERT mean pooling.
-  Tokenize tối đa256 tokens; đếm trường bị truncation trong manifest mỗi split.
-- GPU encoder ảnh dùng BF16 khi hỗ trợ, nếu không FP16; vectors cache float16, heads tính float32.
-  Text encoder frozen/eval, lưu dense float32. Không có augmentation ảnh ngẫu nhiên trong protocol frozen cache.
+Mặc định English age/gender/chief complaint; diagnosis/treatment/examination/full patient record không làm input. Regex loại toàn field có pattern chẩn đoán, không rewrite câu rồi tuyên bố an toàn. Regex không xác minh thời điểm; policy mặc định `screened_exploratory`. Thêm history fields cần review record và temporal verification thực.
 
-Ảnh được encode theo microbatch8 và checkpoint chunk256 ảnh có checksum. Đổi bytes ảnh/model/policy/source builder
-sẽ từ chối trộn cache. Cùng protocol có thể bổ sung shard test sau này mà không đổi identity train/validation.
+Gated MIL: projection Linear→LayerNorm→GELU, attention `softmax(wᵀ[tanh(Vh)⊙sigmoid(Uh)])`, weighted sum, padding mask. Single chọn ảnh hợp lệ đầu theo policy; mean tôn trọng mask. Attention không phải annotation tổn thương.
 
-Nguồn: [DINOv3 models](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m),
-[Transformers DINOv3 4.57.1](https://huggingface.co/docs/transformers/v4.57.1/model_doc/dinov3),
-[BGE-M3 model card](https://huggingface.co/BAAI/bge-m3).
-L2 pooling/resize-pad là protocol thực nghiệm của dự án, không tuyên bố là preprocessing tối ưu được các paper bảo đảm.
+Visual Teacher dùng DINO-L/MIL; MM thêm projected BGE/demographics và gated residual fusion. Masked control giữ cùng MM architecture, clinical bị che toàn bộ. Demographics-only che text; shuffled control hoán vị toàn context giữa các group trong TRAIN, validation/test tự nhiên.
 
-## 3. Clinical whitelist và giới hạn leakage
+Clinical-only control có text projection/head riêng, không có MIL và API từ chối visual tensors. `forward_batch` chỉ truyền clinical arguments cho control này. Student DINO-B/MIL/head từ chối mọi clinical argument; inference không gọi Teacher.
 
-Mặc định chỉ age, gender, chief_complaint tiếng Anh, lấy theo case_id/patient_id khớp manifest.
-Không lấy diagnosis, anomalies, treatment, management, full patient_record, examination hay radiographic interpretation.
-Age: hợp lệ0–120, chia120, thêm cờ missing. Gender: one-hot male/female/unknown. Tổng5 demographic dimensions.
-Chief complaint thiếu → vector text0; cờ clinical_present tính từ text hoặc demographics có sẵn.
+## Profiles, OOF và loss
 
-Trường có pattern chẩn đoán trực tiếp bị loại **toàn trường**, ghi clinical_leakage_audit.csv;
-không sửa một câu y khoa rồi giả định câu đã an toàn. Không dùng y của sample để quyết định whitelist hay rewrite text.
-`clinical_whitelist.yaml` là JSON hợp lệ theo YAML1.2, ghi fields/language/screening/review status.
-Tỷ lệ thiếu/chặn có thể tính từ audit; không xuất raw clinical text trong báo cáo public.
+Visual12 fits → clinical 18 → transfer 45, hoặc core gộp63. Controls 87 chứa Reliability/gate components, label smoothing, weighted CE và ResNet/Swin. Counts dùng3 seeds/5 folds; stages độc lập lặp một số full fits. CLI `plan` là nguồn count hiện hành. Clinical-only stage không xuất Student.
 
-Regex chỉ là sàng lọc. Code không xác nhận ai ghi clinical vào thời điểm nào; default
-clinical_temporal_verified=false, status=screened_exploratory. Chỉ thêm present_illness/past_medical_record
-khi có clinical_temporal_verified=true **và clinical_review_record**; việc khai báo phải dựa trên review thực.
-Không diễn giải teacher benefit là ích lợi pre-diagnostic đã chứng minh khi chưa hoàn tất review này.
+OOF chỉ tạo khi có KD hoặc weighted CE. Mỗi seed fit full Visual/MM Teachers, chọn epoch theo validation; StratifiedGroupKFold5 trên train groups, fit mỗi Teacher riêng từ đầu. Held-out fold không tham gia fit/checkpoint selection. **Cosine horizon luôn config.epochs**, kể cả khi OOF dừng tại selected epoch. Vì vậy OOF dùng prefix cùng lịch full Teacher. Protocol lưu scheduler horizon/source/config/feature/target identities.
 
-## 4. Kiến trúc
+Validation chọn schedule chung nên OOF không phải nested CV hoàn toàn độc lập với validation. Lưu train/heldout IDs/groups, fold assignment, checkpoint hashes và aligned logits; mỗi ca train nhận một prediction held-out. Không dùng encoder đã fine-tune toàn train để giả OOF.
 
-Gated MIL có projection Linear → LayerNorm → GELU cho mỗi ảnh h_i. Attention:
+`L = CE + lambda*T²*KL(softmax(teacher/T) || softmax(student/T))`, lambda1/T4 mặc định; logits Teacher detach. Gate dùng temperature1:
 
-`a_i = softmax_i(wᵀ[tanh(Vh_i) ⊙ sigmoid(Uh_i)])`, `z = Σ a_i h_i`.
+`w = 1[MM argmax=y] * (1-H(p_MM)/log(K)) * [epsilon+(1-epsilon)*p_Visual(y)]`, epsilon0.1.
 
-Mask padding trước softmax; mỗi bag phải có ≥1 ảnh. MIL bất biến theo thứ tự ảnh.
-Width256, dropout0.2; classification head trả sáu logits. Không coi attention là giải thích tổn thương đã được xác nhận.
+Weighted loss là batch mean của `(w/mean_OOF_train(w))*KL_T`. Không chuẩn hóa lại theo mean microbatch; batch1 không triệt tiêu gate. Mean weight0 gây lỗi, không silent fallback. CE vẫn học mọi mẫu của KD, kể cả gate0.
 
-- Visual Teacher: frozen DINO-L descriptors → MIL → head.
-- MM Teacher: cùng DINO-L/MIL, `t = TextProjection([BGE, demographics])`,
-  `g = sigmoid(W[z,t]) × clinical_present`, `fused = LayerNorm(z + g×t)` → head.
-  Text được mask khi clinical thiếu. Có lựa chọn concat cho thí nghiệm riêng, mặc định gated.
-- Student: frozen DINO-B descriptors → MIL → head, API từ chối clinical/demographics trong forward.
-  Targets/labels chỉ xuất hiện trong loss, không được nối vào visual features.
-- ResNet/Swin controls: frozen encoder tương ứng → cùng gated MIL/head.
+Weighted-CE control dùng `CE + lambda*(w/mean_train(w))*CE`, thay auxiliary KL bằng CE và không đọc teacher soft logits trong loss. Nó kiểm tra lời giải thích do weighting; không phải bằng chứng cô lập toàn bộ cơ chế KD. `history.csv` ghi `auxiliary_loss_kind` để phân biệt.
 
-Các encoder có dữ liệu/recipe pretraining khác nhau; so sánh ResNet/Swin/DINO không tách riêng tác động kiến trúc.
+Correctness/visual-support gates là heuristic. Có thể giảm KD ở ca khó/lớp hiếm hoặc MM-only-correct, chưa chứng minh visual sufficiency/clinical dependency. `weight_diagnostics.json` và `teacher_strata.json` giữ cách diễn giải mô tả. Optional `kd_feature` align sang frozen DINO-L image descriptor, không fused latent khác hệ tọa độ giữa folds.
 
-BGE/DINO không được optimizer cập nhật trong v4. Biểu diễn cached không phụ thuộc nhãn huấn luyện.
-Nếu chuyển sang fine-tune foundation encoder trong tương lai, phải tạo encoder riêng theo fold;
-không dùng features từ encoder đã fine-tune trên toàn train để giả làm OOF.
+## Training, evaluation và export
 
-## 5. OOF targets
+AdamW LR1e-3/WD1e-4; cosine30 epochs, patience8 full fits; batch32/accumulation1, gradient clip5. Không class weighting/sampling mặc định. Seeds2026/2027/2028; validation chọn checkpoint macro-F1. Resume epoch-boundary phục hồi model/optimizer/scheduler/RNG, kiểm tra fingerprint; đổi source cần study mới.
 
-Mỗi seed: fit Visual/MM Teachers trên train, chọn best epoch theo macro-F1 validation độc lập.
-Sau đó StratifiedGroupKFold5 trên **train split_group**. Mỗi fold fit lại head/MIL/fusion từ đầu,
-chỉ dùng các nhóm training của fold. Số epoch cố định bằng best_epoch của full-fit Teacher tương ứng.
-Không tính metric held-out fold trong fit và không chọn checkpoint bằng nhãn held-out fold.
+Report mean/std qua seeds, per-class support/precision/recall/F1, accuracy/balanced accuracy, AUROC khi xác định, ECE/Brier, risk–coverage. Bootstrap split_group và paired same-cases/seeds. CI điều kiện trên models đã fit, không CI retraining; chưa hiệu chỉnh multiplicity. Chỉ xuất contrast có đủ systems; visual-only stage không yêu cầu MM strata.
 
-Dự đoán fold giữ lại tạo logits cho từng ca train đúng một lần. Lưu IDs, fold, train/heldout groups,
-checksum checkpoint, source/cache fingerprint trong `_oof/seed_*/targets.json` và `targets.npz`.
-Validation được dùng chọn training schedule chung; đây không phải nested CV độc lập hoàn toàn với validation.
-Test chưa được mở. Inference Student không gọi bất kỳ Teacher nào.
+`freeze_test_protocol` khóa completed study/config/source/checkpoints trước khi tạo test shard. `review_record` ghi protocol/giới hạn, không phê duyệt chuyên môn. Giữ shard train/validation checksums khi thêm test. Không lựa chọn theo test.
 
-## 6. Loss và weighting
+Export dùng `export_method` đăng ký trong config; seed theo validation, không test. Artifact gồm head, DINO-B encoder, manifest/hash/source và photo-only API. Clinical stage không có Student nên notebook bỏ export. `python -m clindistill` dùng research CLI; `legacy` truy cập trainer cũ rõ ràng.
 
-Teacher và no-KD: CE trên nhãn single-target. Students KD:
+## Readiness và runtime
 
-`L = CE(y, student) + λ × T² × KL(softmax(teacher/T) || softmax(student/T))`.
+Mỗi study ghi `research_readiness.json`, task contract, cohort/per-class clinical availability và pending reviews. `confirmatory` bị chặn nếu debug, release chưa `reviewed`, còn pending, hoặc clinical chưa có review provenance khi sử dụng. Dù đủ điều kiện, software không tự chứng nhận novelty/clinical safety/publication readiness.
 
-Mặc định λ=1, T=4, hướng KL Teacher→Student. Teacher logits detach.
-KD Visual lấy Visual OOF; KD Multimodal lấy MM OOF, weights=1.
-Confidence KD lấy MM OOF với `c=1−H(p_m)/log(K)`.
-
-Reliability KD:
-
-`w = 1[argmax(p_m)=y] × c × [ε+(1−ε)×p_v(y)]`, ε=0.1.
-
-Gate probabilities dùng temperature1, riêng với temperature4 của KL. y chỉ là nhãn train của ca có logits OOF.
-Loss weighted = `mean_batch[(w / mean_OOF_train(w)) × KL_T]`.
-**Không** dùng mean_batch(w) làm mẫu số: batch1 sẽ làm trọng số bị triệt tiêu.
-Microbatches được nhân số mẫu/thực số mẫu trong accumulation window, kể cả remainder cuối epoch.
-Nếu mean weights=0 thì báo lỗi để kiểm tra Teacher; không tự fallback thành CE hay bỏ thí nghiệm.
-
-Correctness gate có thể bỏ mẫu khó/rare classes, là giả thuyết cần kiểm chứng. Lưu mean/zero fraction theo class.
-Các đối chứng vanilla/confidence là bắt buộc để tách lợi ích weighting khỏi việc chỉ đổi backbone.
-Chưa có cơ sở nói proposed weighting sẽ thắng.
-
-Optional `kd_feature` có head alignment sang **mean frozen DINO-L image descriptor** và cosine loss,
-weight theo reliability. Không align fused latent của nhiều Teacher folds vì các latent có hệ tọa độ học khác nhau.
-Method này không chạy mặc định; phải đăng ký thành study khác nếu thêm vào so sánh.
-
-## 7. Huấn luyện, resume và selection
-
-AdamW LR1e-3, weight decay1e-4, cosine decay; batch32, accumulation1; clip grad norm5.
-30 epochs tối đa, patience8 cho full fits. CE không dùng class weighting/sampling trong protocol mặc định,
-để so sánh các loss trên cùng objective phân phối train. Macro-F1 và per-class metrics làm rõ imbalance.
-Seeds2026/2027/2028, dataloader shuffle có seed theo epoch, deterministic mode cảnh báo nếu op chưa deterministic.
-
-`best.pt`: head model/spec + best epoch/validation metrics. `last.pt`: model+optimizer+scheduler+RNG/history.
-Resume từ epoch boundary. Check config/source/cache/OOF identity; không resume vào study khác.
-Kết quả saved seeds đã hoàn thành được dùng lại; không train lại chỉ vì Run All lần nữa.
-Không cam kết bitwise giống nhau khi đổi GPU/PyTorch; CPU epoch-resume đã được kiểm thử chính xác.
-
-## 8. Đánh giá và xuất Student
-
-12 hệ thống ×3seeds =36 full fits;30 OOF fits bổ sung. Report mean/std của các seed đã đăng ký,
-không chọn seed có test tốt nhất. Per-class recall/AUROC, macro-F1, accuracy, Brier, ECE10bins,
-confusion matrix, risk–coverage, case/error/subgroup analysis.
-
-Group bootstrap resample split_group, giữ các visit liên quan đi cùng nhau.
-Paired bootstrap so sánh đúng cùng cases/seeds; CI điều kiện trên mô hình đã fit, không phải CI cho retraining.
-Năm primary contrasts: MM−Visual Teacher, MM KD−Visual KD, Reliability−NoKD, Reliability−VanillaMM, Reliability−Confidence.
-CI hiện chưa hiệu chỉnh nhiều phép so sánh: diễn giải mô tả, không tự gọi significance xác nhận.
-
-Test mặc định khóa; notebook03 cần completed study và test_review_record mô tả protocol đã cố định/giới hạn còn lại.
-Không tự đánh dấu các pending_reviews thành PASS khi thêm record này.
-Khi thêm test features, cache train/validation phải giữ nguyên checksum.
-
-Export chọn method đã đăng ký, seed tốt nhất theo validation. Gồm `student_head.pt`, `image_encoder/`, manifest.
-`predict_student(export_root, photo_paths, image_root, work_dir)` nhận raw photos; không có clinical/label argument.
-Gói inference này cần package source cùng version; weights tiếp tục chịu điều khoản DINOv3.
-
-## 9. Kiểm chứng và phần chưa làm
-
-Tests dùng synthetic visits/features và tiny randomly initialized DINOv3/XLM-R models để kiểm tra backend,
-local-only I/O, dimensions/pooling, mask, KL/gradients, group folds, checksums, resume, report/export/inference.
-Notebook02 được thực thi cả các code cells với fixture CPU. Tests không chứng minh pretrained performance.
-Bank00 có thêm rehearsal mini COde thật bằng pretrained models thật; cần chạy trong môi trường Kaggle của bạn.
-Chưa có full COde DINO results hay kiểm chứng tốc độ/VRAM của phiên L4 thực trong lần sửa code local này.
-
-Chưa làm Stage2/3 partial/full encoder fine-tuning, hyperparameter sweeps, exhaustive clinical/MIL/robustness ablations,
-MeMoSA external validation hoặc chứng nhận clinical timing/annotation. Việc này phải được ghi là giới hạn,
-không đổi tên các checks phần mềm thành “đã hoàn thành khóa luận/bài Q1”.
+Bank6 cài project wheel0.6.0 đúng source; addons Transformers4.57.1/hub0.36.2, setuptools68–<82, fsspec được giữ theo target. Sau install, kiểm tra transitive dependency closure thực dùng. Conflict trong closure gây lỗi; conflict thư viện Kaggle ngoài closure được báo riêng. CPU preparation chỉ xác nhận metadata/local CPU backend loading; activation GPU vẫn kiểm tra target chính xác. Cần fresh Kaggle run để xác nhận môi trường thật.

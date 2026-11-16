@@ -1,4 +1,21 @@
-# Kiểm chứng implementation v5 — 02/11/2026
+# Kiểm chứng implementation 0.6.0 — 16/11/2026
+
+- **77 tests qua** trong một lượt đầy đủ trên Windows/Python3.14.2, Torch2.11.0+cu128/vision0.26.0+cu128, Transformers4.57.1/hub0.36.2, NumPy2.5.5/pandas3.0.1/scikit-learn1.8.0. Lượt xác nhận này đặt `CUDA_VISIBLE_DEVICES=-1`, chạy CPU trong60,3giây. Tests dùng synthetic features/tiny random encoders; không phải pretrained CODe results.
+- OOF regression kiểm tra model tensors/scheduler khớp chính xác prefix full-fit cùng seed và resume epoch-boundary khi dùng cùng cosine horizon; held-out fold không được dùng chọn epoch.
+- Clinical-only model không có MIL, API từ chối ảnh; đổi visual tensors không đổi logits, đổi clinical có thể đổi logits. Student boundary và các clinical/masked/shuffle controls vẫn được kiểm tra.
+- Weighted-CE dùng weights OOF và không phụ thuộc soft logits của Teacher; weights collapse gây lỗi. Staged visual/clinical/transfer chạy/report độc lập; stage không có Student bỏ export.
+- CLI plan khớp counts12/18/45/core63/controls87; integration train/evaluate chạy research pipeline, one-seed std được xuất JSON null; legacy yêu cầu lệnh rõ ràng.
+- Confirmatory guard giữ các pending in-scope reviews và không nâng trạng thái expert/clinical. Thiếu approval cho complete multi-label negatives không chặn task single-target; trạng thái đó vẫn được giữ trong report.
+- Dependency checks phân biệt conflict trong transitive closure thực dùng với thư viện ngoài scope; kiểm tra setuptools<82, hub pin và fsspec target. Reuse bank5→6 chỉ copy model files/revisions đã so hash, không reuse source/wheels; sửa bytes gây lỗi. Preflight trước training so toàn bộ model fingerprints với cache.
+- Năm notebook được kiểm tra nbformat/AST, outputs sạch và generator idempotent; feature builder `research/data.py` byte-identical với main0.5.1, nên không ép trích lại cache chỉ vì nâng source. Source/wheel provenance và packaging được kiểm thử.
+- `review-status` trên artifact local vẫn báo120/120 clinical-label records chưa điền và5.257/5.257 near-duplicate decisions chưa điền. Không thay clinical contexts, prepared release, split hoặc review decisions.
+- Đã thêm CI CPU/Linux/Python3.11/Torch2.6.0/vision0.21.0 để kiểm tra thêm trên môi trường độc lập; xem GitHub checks của PR cho kết quả thực, không suy ra CI đã qua từ lượt local.
+
+**Giới hạn:** chưa thực hiện fresh Kaggle bank6/CPU→GPU activation, full CODe pretrained train/test, benchmark latency/VRAM hoặc expert review. Issue#4 vẫn mở cho xác nhận runtime thực. Việc bank/source/controls sẵn sàng không chứng minh clinical benefit, Reliability KD superiority, novelty hoặc clinical safety.
+
+## Bằng chứng lịch sử v5 — 02/11/2026
+
+Các mục bên dưới thuộc các phiên bản/lần chạy cũ, không thay thế kiểm chứng0.6.0 ở trên.
 
 ## Bổ sung 08/11/2026: regression clinical và output Kaggle notebook01
 

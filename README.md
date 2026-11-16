@@ -1,46 +1,55 @@
-# ClinDistill — khóa luận trên COde
+# ClinDistill — phân loại target nha khoa được ghi nhận trên CODe
 
-Pipeline nghiên cứu phân loại ảnh nha khoa, sử dụng thông tin lâm sàng khi huấn luyện Teacher và knowledge distillation sang Student chỉ dùng ảnh. Phạm vi hiện tại là **COde**; MeMoSA để giai đoạn sau.
+Nghiên cứu kiểm tra liệu clinical context dùng khi huấn luyện có giúp Student chỉ nhận ảnh phân loại tốt hơn trên cùng cohort/split hay không. Hiện triển khai **CODe photo-only, DINOv3/BGE-M3 frozen, học MIL/projection/fusion/head**. Không có healthy class, không bao phủ mọi bệnh nha khoa và chưa phải mô hình chẩn đoán lâm sàng đã thẩm định.
 
-**Bắt đầu tại [Khóa luận/README.md](Khóa%20luận/README.md)**: chuẩn bị Kaggle offline, dữ liệu, train và đánh giá.
+**Bắt đầu tại [Khóa luận/README.md](Khóa%20luận/README.md)** và [runbook Kaggle](Khóa%20luận/_support/KAGGLE_RUNBOOK.md). Package **0.6.0**, bank **v6**, giữ prepared `code_v1` và builder/cache `research_features_v3` của0.5.1. Tạo study mới; không resume checkpoint từ phương pháp cũ.
+
+| Giai đoạn | Profile | Câu hỏi | Fits, 3 seeds |
+|---|---|---|---:|
+| Visual | `research_visual.json` | Một ảnh, mean, attention MIL và Visual Teacher | 12 |
+| Clinical | `research_clinical.json` | Clinical-only, demographics, shuffle và masked control | 18 |
+| Transfer | `research_transfer.json` | Student no-KD, Visual KD và MM KD | 45 |
+| Core gộp | `research.json` | Các hệ thống cốt lõi trên cùng protocol | 63 |
+| Mở rộng | `research_controls.json` | Reliability/gate components, weighted CE, CNN/Swin | 87 |
+
+Notebook02 mặc định bắt đầu **visual**. Các stage có run_name riêng và lặp một số fits; không cộng chúng thành số fits của core gộp. Chỉ chuyển giai đoạn sau khi đọc validation; kết quả bất lợi cho clinical/KD vẫn là kết quả hợp lệ.
 
 | Notebook | Vai trò |
 |---|---|
-| [00 — Offline setup](Khóa%20luận/COde_00_Kaggle_Offline_Setup.ipynb) | Chuẩn bị wheels và pretrained weights khi còn Internet |
-| [01 — Data preparation](Khóa%20luận/COde_01_Data_Audit_and_Preparation.ipynb) | Làm sạch, EDA, kiểm định, chia tập và frozen DINO/BGE features |
-| [02 — Train](Khóa%20luận/COde_02_Train_Baselines.ipynb) | DINOv3 Teachers, group-OOF, reliability KD, 3 seeds và Student chỉ ảnh |
-| [03 — Evaluate](Khóa%20luận/COde_03_Evaluate.ipynb) | Metrics, so sánh thực nghiệm và xuất Student |
+| `00_Kaggle_Offline_Setup` | Inspect target, chuẩn bị dependency bank/pretrained assets trên Linux online |
+| `01_Data_Audit_and_Preparation` | Audit, review templates, prepared split và features |
+| `01_Features_Only` | Dùng prepared release có sẵn, không chia lại split |
+| `02_Train_Baselines` | Chạy từng profile, OOF khi cần, resume và export Student |
+| `03_Evaluate` | Validation; khóa protocol trước khi chuẩn bị/mở test |
 
-## Các tài liệu và code bổ sung
+## Điều kiện bằng chứng
 
-- `Paper/`: các paper tham khảo, literature review và báo cáo seminar đã có tại máy làm việc. Quyền tác giả thuộc các tác giả/nhà xuất bản tương ứng.
-- `Baseline/Seminar/`: notebook và script baseline ban đầu; `COde_HF/` chỉ gồm README, thông tin Git và Data Usage Agreement, không có dataset.
-- [Baseline/Qwen2.5-VL/](Baseline/Qwen2.5-VL/README.md): 7 notebook tái lập Qwen 3B/7B có log thực thi và bảng Excel so sánh. Xem README của thư mục để biết thứ tự chạy và giới hạn của kết quả.
-- `Seminar.png`: hình seminar.
-- `explore-data.ipynb`, `run-all-2.ipynb`: các notebook ban đầu, giữ để tham khảo. Pipeline hiện tại bắt đầu từ notebook 00–03 trong `Khóa luận/`.
+- Software checks dùng synthetic data/tiny random encoders, không chứng minh hiệu quả pretrained.
+- Log Kaggle cung cấp trước đây xác nhận bước trích feature; repo chưa có full ClinDistill training/test results được kiểm chứng.
+- Nhãn là target ghi nhận trong hồ sơ. Review annotation/clinical timing/near-duplicates còn mở; absent labels không tự là âm tính hoặc khỏe mạnh.
+- Reliability là trọng số theo mẫu từ dự đoán OOF, chưa phải chọn lọc field hay thước đo visual sufficiency.
+- `exploratory` giữ pending reviews; `confirmatory` bị chặn khi release/review chưa đủ điều kiện. Hoàn thành software run không tự nâng trạng thái nghiên cứu.
 
-Các notebook nghiên cứu được xóa output trước khi đưa lên Git. Riêng `Baseline/Qwen2.5-VL/` giữ output của các lần chạy đã cung cấp để đối chiếu kết quả và [Issue #1](https://github.com/Dungkdl/Seminar-HCMUS/issues/1); điểm số trong log chưa được chấm lại sau review. Notebook baseline đọc token Hugging Face từ biến môi trường `HF_TOKEN` thay cho token ghi trực tiếp; cung cấp biến này khi thực sự cần xác thực.
+Phạm vi/phương pháp: [plan hiện hành](CODe_Research_Implementation_Plan.md). Sơ đồ: [Seminar.md](Seminar.md). Kế hoạch/poster ban đầu được giữ ở `docs/archive/` như tài liệu lịch sử.
 
-## Dữ liệu và artifact
+## Source và dữ liệu
 
-Repo lưu mã nguồn, notebook nghiên cứu không có output, log notebook tái lập Qwen, cấu hình, tests và tài liệu kỹ thuật. COde, bản mini, clinical embeddings, weights, checkpoints và các ZIP upload Kaggle không nằm trong Git. Các đường dẫn artifact trong hướng dẫn chi tiết trỏ tới file được tạo tại máy làm việc, không phải file có sẵn sau khi clone.
+`Khóa luận/clindistill/research/` là pipeline hiện hành; CLI `python -m clindistill` dùng pipeline này. Trainer cũ chỉ truy cập bằng `python -m clindistill legacy ...`.
 
-Đặt dữ liệu có quyền sử dụng tại `Data/COde-Dataset (1)/` cạnh thư mục `Khóa luận/`, gồm `complete_dataset.csv` và `Images/`, hoặc dùng biến đường dẫn override trong notebook. Notebook 01 tạo prepared release. Giữ dữ liệu trên Kaggle trong phạm vi truy cập phù hợp dữ liệu gốc.
+`Baseline/`, `run-all-2.ipynb`, `explore-data.ipynb` được giữ độc lập; Qwen không thuộc đợt củng cố này. [Paper/README.md](Paper/README.md) ghi nguồn và sửa nhầm file DentVLM.
 
-Chạy `Khóa luận/_support/research-notes/package_kaggle.py` để tạo source ZIP và project wheel tại `_support/dist/`, chưa cần có dữ liệu. Khi muốn thêm prepared ZIP, truyền `--prepared-root` tới release `code_v1`. Notebook 00 chuẩn bị dependency wheels và pretrained weights trên Linux; môi trường đóng gói cần setuptools và wheel.
+Không commit ảnh CODe, patient records/IDs, clinical vectors, raw predictions, weights/checkpoints. Bundles và kiểm tra local ở ignored `_support/dist/`. Dữ liệu có quyền sử dụng ở `Data/` hoặc đường dẫn override; source bundle mặc định không chứa dataset.
 
-## Kiểm tra mã nguồn
+## Kiểm tra local
 
-Trong môi trường có dependencies khoa học/PyTorch tương thích:
+Trong môi trường khoa học/PyTorch tương thích:
 
 ```bash
 cd "Khóa luận"
+python -m pip install "setuptools>=68,<82" "wheel>=0.43"
 python -m pip install -e ".[clinical,dev]"
 python -m unittest discover -s _support/tests -p "test_*.py"
+python -m clindistill plan --config configs/code/research_visual.json
 ```
 
-Lệnh cài trên dùng cho môi trường có Internet. Với GPU chặn Internet, thực hiện notebook 00 theo hướng dẫn chi tiết; giữ cặp torch/torchvision của môi trường đích.
-
-Tests dùng dữ liệu tổng hợp. Smoke tại local chỉ xác nhận pipeline; chưa phải kết quả train đầy đủ trên RTX 6000/Kaggle và chưa chứng minh hiệu quả nghiên cứu.
-
-Bản research v5 (package 0.5.1) thực hiện Stage 1 frozen DINOv3-B/L + BGE-M3, gated MIL/fusion và group-OOF KD, có đối chứng thành phần KD và clinical/MIL. Xem [hướng dẫn wheel offline trên Kaggle](Khóa%20luận/_support/KAGGLE_RUNBOOK.md) và [plan](CODe_Research_Implementation_Plan.md). Chưa có full COde DINO results hoặc Stage 2/3 encoder fine-tuning. Bank v5/source0.5.1/cache v3 cần được tạo bằng source mới; giữ nguyên prepared split nếu đã có.
+[#5](https://github.com/Dungkdl/Seminar-HCMUS/issues/5) theo dõi đợt sửa này; [#1](https://github.com/Dungkdl/Seminar-HCMUS/issues/1) vẫn mở cho nghiên cứu/review; [#4](https://github.com/Dungkdl/Seminar-HCMUS/issues/4) theo dõi xác nhận dependency/runtime trên Kaggle thật.

@@ -49,16 +49,16 @@ print('Features:', FEATURE_ROOT, '\\nStudy:', STUDY_ROOT)
 def refresh():
     path, nb = load('COde_00')
     put(nb, 0, '''
-        # COde 00 — Research wheel bank v5
+        # COde 00 — Research wheel bank v6 / package 0.6.0
 
         Chạy ONLINE trên Linux/Kaggle có cùng Python/scientific stack với phiên GPU đích.
         Nếu RTX PRO 6000 chặn Internet: notebook00 dùng Accelerator=None (CPU), Internet ON.
         Notebook01/02 mới dùng Pro6000, Internet OFF. Lỗi đọc Secrets chưa chứng minh HF token sai.
         TARGET_ENVIRONMENT có thể giữ inventory từ MODE='inspect' trên GPU để so trước khi tải.
-        Gắn source 0.5.1 đã giải nén. Chưa có prepared release vẫn chạy: RUN_MINI_REHEARSAL=False.
+        Gắn source 0.6.0 đã giải nén. Chưa có prepared release vẫn chạy: RUN_MINI_REHEARSAL=False.
         Bank chứa project wheel, dependency wheelhouse + requirements.lock, source/configs và pretrained weights có checksum.
         Chấp nhận điều khoản DINOv3-B/L, thêm Kaggle Secret HF_TOKEN và cấp quyền cho notebook.
-        Hướng dẫn: _support/KAGGLE_RUNBOOK.md. Bank v4 không dùng cho source mới.
+        Hướng dẫn: _support/KAGGLE_RUNBOOK.md. Bank cũ cần tạo lại; không đổi prepared split/features.
     ''')
     source = ''.join(nb['cells'][1]['source'])
     if 'TARGET_ENVIRONMENT = ' not in source:
@@ -73,38 +73,31 @@ def refresh():
 runtime_spec = importlib.util.spec_from_file_location('research_hardware', source / 'clindistill/research/runtime.py')
 runtime = importlib.util.module_from_spec(runtime_spec); runtime_spec.loader.exec_module(runtime)
 print(json.dumps(runtime.hardware(), indent=2))""")
-    start = source.index("if MODE == 'prepare':\n")
-    source = source[:start] + '''if MODE == 'prepare':
+    for marker in ('# Online preparation helpers', '# Research bank v6 dispatch'):
+        source = source.split(marker)[0]
+    source = source.replace('clindistill_research_v3', 'clindistill_research_v6').replace("'Source v5'", "'Source 0.6.0'")
+    if 'REUSE_MODELS_FROM = ' not in source:
+        source = source.replace('RUN_MINI_REHEARSAL = False',
+            'REUSE_MODELS_FROM = None  # prior bank5/6 root; verified weights/revisions only\nRUN_MINI_REHEARSAL = False')
+    source += '''# Research bank v6 dispatch: use the versioned helper, never patch an older bank in memory.
+if bank.BANK_SCHEMA != 6:
+    raise RuntimeError('Attach source 0.6.0 with bank schema6; do not combine this notebook with an old addon.')
+if MODE == 'prepare':
     if TARGET_ENVIRONMENT is None and bank.inventory()['packages']['torch'].endswith('+cpu'):
         raise RuntimeError('CPU online setup needs TARGET_ENVIRONMENT copied from GPU MODE=inspect. '
                            'The bank must record the GPU target, not the CPU Torch build.')
     if TARGET_ENVIRONMENT is not None:
-        bridge = require_preparation_environment(TARGET_ENVIRONMENT, bank.inventory())
+        bridge = bank.require_preparation_environment(TARGET_ENVIRONMENT, bank.inventory())
         if bridge:
             print('CPU online -> CUDA target: same Torch/vision releases; all other packages match. GPU activation remains strict.')
-    check_online()
-    read_hf_token()
-    # Backward-compatible prepare implementation for the existing uploaded 0.5.1 addon.
-    PREPARATION_COMPAT_PLACEHOLDER
-    info = bank.prepare(source, BANK_ROOT, target_environment=TARGET_ENVIRONMENT)
+    bank.check_online()
+    bank.read_hf_token()
+    info = bank.prepare(source, BANK_ROOT, target_environment=TARGET_ENVIRONMENT, reuse_models_from=REUSE_MODELS_FROM)
 elif MODE == 'inspect':
     print('INSPECT ONLY: no network, Secrets or downloads. Copy the inventory JSON into TARGET_ENVIRONMENT on the online CPU notebook.')
 else:
     raise ValueError('MODE must be inspect or prepare.')
 '''
-    # Inline stdlib-only helpers so the replacement works with the uploaded 0.5.1 addon.
-    marker = '# Online preparation helpers (safe with the existing 0.5.1 addon)\n'
-    if marker in source:
-        left = source.index(marker)
-        right = source.index("if MODE == 'prepare':\n", left)
-        source = source[:left] + source[right:]
-    helpers = '\n\n'.join(inspect.getsource(getattr(bank, name)).strip()
-        for name in ('require_environment', 'require_preparation_environment', 'check_online', 'read_hf_token'))
-    prepare_helpers = '\n\n'.join(inspect.getsource(getattr(bank, name)).strip()
-        for name in ('require_environment', 'require_preparation_environment', 'prepare'))
-    source = source.replace('PREPARATION_COMPAT_PLACEHOLDER', f'exec({prepare_helpers!r}, bank.__dict__)')
-    start = source.index("if MODE == 'prepare':\n")
-    source = source[:start] + marker + helpers + '\n\n' + source[start:]
     put(nb, 1, source)
     source = ''.join(nb['cells'][3]['source']).replace("sys.path.insert(0, str(BANK_ROOT / 'source'))", "bank.installed_project_matches(info['project_files'])")
     put(nb, 3, source)
@@ -120,7 +113,7 @@ else:
     path, nb = load('COde_01')
     put(nb, 2, bank.BOOTSTRAP_CELL)
     put(nb, 1, '''
-        ## Thiết lập wheel bank v5
+        ## Thiết lập wheel bank v6 / package0.6.0
 
         Gắn output notebook00, chạy bootstrap trước import. Lần đầu audit raw CSV/Images rồi xuất code_v1.
         Nếu đã có prepared release, chạy bootstrap rồi mục15; không chia lại split.
@@ -151,7 +144,7 @@ else:
         models = MODEL_LOCATIONS_OVERRIDE or (RESEARCH_ASSETS['models'] if RESEARCH_ASSETS else None)
         if models is None:
             raise RuntimeError('Attach the ClinDistill research bank; Qwen weights are not DINO/BGE assets.')
-        cfg = read_json(PROJECT_ROOT / 'configs/code/research.json')
+        cfg = read_json(PROJECT_ROOT / 'configs/code/features.json')
         cfg.update(image_batch_size=IMAGE_BATCH_SIZE, image_workers=IMAGE_WORKERS, clinical_batch_size=CLINICAL_BATCH_SIZE)
         destination = Path(RESEARCH_FEATURE_OUTPUT_OVERRIDE) if RESEARCH_FEATURE_OUTPUT_OVERRIDE else (
             Path('/kaggle/working/data/COde_processed/research_features_v3') if Path('/kaggle').exists()
@@ -190,7 +183,8 @@ else:
 
         Có prepared release thì chạy bootstrap và cell này. Mặc định chỉ train/validation.
         Clinical: English age/gender/chief complaint. Review chưa xác minh vẫn screened_exploratory.
-        Source 0.5.1 cần cache mới research_features_v3; giữ nguyên split code_v1.
+        Source0.6.0 giữ nguyên feature builder và cache research_features_v3/code_v1.
+        Dùng features.json cố định encoder/policy; các profile train không thay đổi feature identity.
         Hỗ trợ code_full_offline_assets/data/images với prepared release + image_index.json bổ sung.
         cls_train.json/cls_test.csv không thay cho patient/clinical metadata của ClinDistill.
         Để thêm test: notebook03 khóa protocol trước, gắn test_protocol.json rồi đặt PREPARE_SPLITS=['test'].
@@ -211,10 +205,12 @@ else:
     put(nb, 0, '''
         # COde 02 — ClinDistill: KD thành phần và đối chứng
 
-        Gắn bank v5/source 0.5.1 + cache v3, chọn GPU, tắt Internet, Run All.
+        Gắn bank v6/source0.6.0 + cache v3, chọn GPU, tắt Internet, Run All.
         Không đọc raw CSV, chia lại split hoặc mở test. DINO/BGE cố định, chỉ học MIL/fusion/head.
-        Mặc định 12 hệ thống × 3 seeds + 30 OOF fits = 66 fits.
-        CONFIG_FILE='research_controls.json' thêm single/mean MIL và clinical controls: 81 fits.
+        Mặc định research_visual.json: single/mean/MIL + Visual Teacher, 12 fits, không OOF.
+        Tiếp theo research_clinical.json (18 fits), research_transfer.json (45 fits).
+        Đọc validation để quyết định bước tiếp; không tự khẳng định clinical/KD phải thắng.
+        research.json là core gộp63 fits; research_controls.json là mở rộng87 fits, gồm Reliability/weighted CE.
         Các gate là giả thuyết cần kiểm nghiệm, không phải chứng nhận visual sufficiency.
     ''')
     put(nb, 1, '''
@@ -225,16 +221,26 @@ else:
         FEATURE_ROOT_OVERRIDE = None
         OUTPUT_ROOT_OVERRIDE = None
         PREVIOUS_STUDY_OVERRIDE = None
-        CONFIG_FILE = 'research.json'
+        CONFIG_FILE = 'research_visual.json'
         RUN_NAME = None  # dùng run_name của config; đổi khi thay protocol
         RUN_TRAIN = True
     ''')
-    put(nb, 2, '## 1. Cài wheel offline và tìm cache\n\nDùng bank v5/source 0.5.1. Không trộn bank/cache/checkpoint cũ.')
+    put(nb, 2, '## 1. Cài wheel offline và tìm cache\n\nDùng bank v6/source0.6.0. Tạo study mới; có thể giữ cache v3 từ0.5.1.')
     put(nb, 3, bank.BOOTSTRAP_CELL)
     put(nb, 4, PATHS_CELL)
+    source = ''.join(nb['cells'][5]['source'])
+    marker = '# Verify attached bank against feature cache before any fits.'
+    source = source.split(marker)[0].rstrip()
+    source += '''\n# Verify attached bank against feature cache before any fits.
+if RESEARCH_ASSETS:
+    from clindistill.research.training import verify_feature_assets
+    verify_feature_assets(STORE, RESEARCH_ASSETS['models'])
+'''
+    put(nb, 5, source)
     put(nb, 7, '''
         ## 3. Huấn luyện
 
+        Visual stage chạy trước clinical và transfer; chỉ KD/weighted CE mới tạo OOF.
         Visual/MM Teachers → group-OOF → Students. Có label smoothing, correctness-only,
         confidence-only, visual-support-only và reliability KD. OOF không fit nhóm held-out.
         Weight chia mean toàn OOF train; CE vẫn học trên ca có gate=0.
@@ -244,6 +250,15 @@ else:
     source = ''.join(nb['cells'][10]['source']).replace('fig, axes = plt.subplots(3, 3, figsize=(16, 11), squeeze=False)',
         'rows = (len(methods) + 2) // 3\n    fig, axes = plt.subplots(rows, 3, figsize=(16, 3.7 * rows), squeeze=False)')
     put(nb, 10, source)
+    put(nb, 12, '''
+        from clindistill.research.reporting import export_student
+        from clindistill.research.training import student_method
+        if RUN_TRAIN and (STUDY_ROOT / 'completed.json').exists() and student_method(CONFIG):
+            encoder = RESEARCH_ASSETS['models']['student'] if RESEARCH_ASSETS else Path(STORE.metadata['model_locations']['student'])
+            info = export_student(FEATURE_ROOT, STUDY_ROOT, encoder, OUTPUT_ROOT / 'student_export' / RUN_NAME)
+            print(json.dumps(info, ensure_ascii=False, indent=2))
+        print('Save Version giữ runs/ và student_export/. Clinical-only stage không xuất Student.')
+    ''')
     save(path, nb)
 
     path, nb = load('COde_03')
@@ -254,7 +269,7 @@ else:
         PROJECT_ROOT_OVERRIDE = None
         FEATURE_ROOT_OVERRIDE = None
         OUTPUT_ROOT_OVERRIDE = None
-        CONFIG_FILE = 'research.json'
+        CONFIG_FILE = 'research_visual.json'
         RUN_NAME = None
         SPLIT = 'validation'
         TEST_REVIEW_RECORD = None
