@@ -1,5 +1,7 @@
 # Kế hoạch phát triển khóa luận ClinDistill — COde chính, MeMoSA phụ
 
+> **Tài liệu lịch sử05/10/2026.** Phạm vi và công thức bên dưới không phải implementation hiện hành. Xem [protocol0.6.0](../../../CODe_Research_Implementation_Plan.md) và [README](../../README.md). Không dùng kế hoạch này để tuyên bố đã triển khai field-separated KD, X-ray hoặc MeMoSA.
+
 Ngày lập: 05/10/2026. Cơ sở: review 23 trang, Seminar.png, các PDF COde, MeMoSA, MMPKD, các phần phương pháp liên quan của TriDeNT và oral multimodal fusion; kiểm tra notebook và dữ liệu COde tại workspace. GPU: người thực hiện xác nhận dùng Kaggle và có tài nguyên đủ tốt. Chưa có hạn nộp cụ thể; tiến độ dưới đây là khung 16 tuần, không phải ngày cam kết.
 
 ## 1. Định hướng nên chốt

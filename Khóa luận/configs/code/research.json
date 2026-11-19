@@ -1,5 +1,5 @@
 {
-  "run_name": "code_research_v3",
+  "run_name": "code_core_v6",
   "seeds": [
     2026,
     2027,
@@ -21,16 +21,15 @@
   "visual_support_epsilon": 0.1,
   "feature_kd_weight": 0.1,
   "methods": [
-    "resnet50_mil",
-    "swin_b_mil",
+    "student_single",
+    "student_mean",
     "student_no_kd",
+    "teacher_clinical",
+    "teacher_demographics",
+    "teacher_visual_control",
+    "teacher_shuffled",
     "kd_visual",
-    "kd_multimodal",
-    "kd_confidence",
-    "kd_reliability",
-    "student_label_smoothing",
-    "kd_correctness",
-    "kd_visual_support"
+    "kd_multimodal"
   ],
   "bootstrap_repetitions": 1000,
   "debug": false,
@@ -51,5 +50,11 @@
   "image_workers": "auto",
   "clinical_batch_size": "auto",
   "evaluation_batch_size": 256,
-  "resident_features": true
+  "resident_features": true,
+  "study_mode": "exploratory",
+  "teachers": [
+    "teacher_visual",
+    "teacher_multimodal"
+  ],
+  "export_method": "kd_multimodal"
 }

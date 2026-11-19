@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sysconfig
 import venv
 import zipfile
 
@@ -90,8 +91,10 @@ class ResearchBankTests(unittest.TestCase):
                 "bank=importlib.util.module_from_spec(spec); spec.loader.exec_module(bank); "
                 f"info=bank.activate({str(asset)!r}); import clindistill; "
                 f"assert pathlib.Path({str(environment)!r}).resolve() in pathlib.Path(clindistill.__file__).resolve().parents; "
-                "assert clindistill.__version__=='0.5.1'; print('WHEEL_IMPORT_VERIFIED')")
-            env=os.environ.copy(); env.pop('PYTHONPATH',None)
+                "assert clindistill.__version__=='0.6.0'; print('WHEEL_IMPORT_VERIFIED')")
+            env=os.environ.copy()
+            # Reuse the tested dependency environment, including pins in a parent virtualenv.
+            env['PYTHONPATH']=sysconfig.get_path('purelib')
             result=subprocess.run([str(python),'-c',script],cwd=source,env=env,capture_output=True,text=True,timeout=120)
             self.assertEqual(result.returncode,0,result.stdout+'\n'+result.stderr)
             self.assertIn('WHEEL_IMPORT_VERIFIED',result.stdout)

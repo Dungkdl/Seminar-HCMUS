@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from ..artifacts import code_hash, file_hash, object_hash, read_json, write_json
 from ..engine import seed_everything, rng_state, restore_rng, save_checkpoint
 from ..metrics import classification_metrics
-from .data import FeatureStore, VisitDataset, collate_visits
+from .data import FeatureStore, VisitDataset, collate_visits, model_assets_hash
 from .losses import reliability_weights, weighted_kd, per_case_kl
 from .models import VisitClassifier
 from .analysis import teacher_strata, weight_diagnostics
@@ -27,7 +27,8 @@ METHODS = ('resnet50_mil', 'swin_b_mil', 'student_no_kd', 'kd_visual',
            'kd_multimodal', 'kd_confidence', 'kd_reliability', 'kd_feature',
            'student_label_smoothing', 'kd_correctness', 'kd_visual_support',
            'student_mean', 'student_single', 'teacher_demographics',
-           'teacher_shuffled', 'teacher_visual_control')
+           'teacher_shuffled', 'teacher_visual_control', 'teacher_clinical',
+           'student_weighted_ce')
 KD_WEIGHT_KEYS = {'kd_confidence': 'confidence', 'kd_correctness': 'correctness',
                   'kd_visual_support': 'support_weight', 'kd_reliability': 'reliability',
                   'kd_feature': 'reliability'}
@@ -39,10 +40,48 @@ ABLATION_COMPARISONS = [('kd_reliability', 'student_label_smoothing'),
     ('kd_reliability', 'kd_correctness'), ('kd_reliability', 'kd_visual_support'),
     ('teacher_multimodal', 'teacher_visual_control'), ('teacher_multimodal', 'teacher_demographics'),
     ('teacher_multimodal', 'teacher_shuffled'), ('student_no_kd', 'student_single'),
-    ('student_no_kd', 'student_mean')]
+    ('student_no_kd', 'student_mean'), ('teacher_multimodal', 'teacher_clinical'),
+    ('kd_reliability', 'student_weighted_ce')]
+
+
+def teacher_names(config):
+    return config.get('teachers', ['teacher_visual', 'teacher_multimodal'])
+
+
+def needs_oof(config):
+    return any(x.startswith('kd_') or x == 'student_weighted_ce' for x in config['methods'])
+
+
+def verify_feature_assets(store, asset_models):
+    """Fail before training if the attached bank differs from the cached pretrained assets."""
+    for role, expected in store.metadata['request']['model_fingerprints'].items():
+        if role not in asset_models:
+            raise ValueError(f'Feature cache needs missing bank model: {role}.')
+        path = Path(asset_models[role])
+        actual = file_hash(path) if path.is_file() else model_assets_hash(path)
+        if actual != expected:
+            raise ValueError(f'Feature/bank pretrained assets differ for {role}; reuse the original bank models or prepare a new cache.')
+
+
+def student_method(config):
+    """Deployment method is registered before test; clinical-only stages export nothing."""
+    selected = config.get('export_method')
+    if selected is not None:
+        if selected not in config['methods'] or selected.startswith('teacher_') or selected in {'resnet50_mil', 'swin_b_mil'}:
+            raise ValueError('export_method must name a registered DINO-B Student.')
+        return selected
+    return next((m for m in ('kd_reliability', 'kd_multimodal', 'student_no_kd') if m in config['methods']), None)
 
 
 def validate_config(config):
+    teachers = teacher_names(config)
+    if not teachers or len(set(teachers)) != len(teachers) or not set(teachers) <= {'teacher_visual', 'teacher_multimodal'}:
+        raise ValueError('Register distinct visual/multimodal Teachers.')
+    if needs_oof(config) and set(teachers) != {'teacher_visual', 'teacher_multimodal'}:
+        raise ValueError('OOF controls require both registered Teachers.')
+    student_method(config)
+    if config.get('study_mode', 'exploratory') not in {'exploratory', 'confirmatory'}:
+        raise ValueError('study_mode must be exploratory or confirmatory.')
     for name in ('folds', 'epochs', 'patience', 'batch_size', 'accumulation_steps', 'feature_dim'):
         if not isinstance(config[name], int) or config[name] < 1:
             raise ValueError(f'{name} must be a positive integer.')
@@ -94,13 +133,14 @@ def grouped_folds(labels, groups, folds, seed):
 
 
 def model_spec(store, config, name):
-    role = ('multimodal_teacher' if name.startswith('teacher_') and name != 'teacher_visual' else
+    role = ('clinical_teacher' if name == 'teacher_clinical' else
+            'multimodal_teacher' if name.startswith('teacher_') and name != 'teacher_visual' else
             'visual_teacher' if name == 'teacher_visual' else 'student')
     key = ('teacher' if name.startswith('teacher_') else
            name.removesuffix('_mil') if name in {'resnet50_mil', 'swin_b_mil'} else 'student')
     return {'visual_dim': store.metadata['dimensions'][key], 'classes': len(store.metadata['class_names']),
             'width': config['feature_dim'], 'dropout': config['dropout'], 'role': role,
-            'clinical_dim': store.metadata['dimensions']['clinical'] if role == 'multimodal_teacher' else 0,
+            'clinical_dim': store.metadata['dimensions']['clinical'] if role in {'multimodal_teacher', 'clinical_teacher'} else 0,
             'fusion': config.get('fusion', 'gated'),
             'pooling': {'student_mean': 'mean', 'student_single': 'single'}.get(name, 'attention'),
             'alignment_dim': store.metadata['dimensions']['teacher'] if name == 'kd_feature' else 0}, key
@@ -108,13 +148,15 @@ def model_spec(store, config, name):
 
 def forward_batch(model, batch, device):
     args = {key: batch[key].to(device, non_blocking=True) for key in ('clinical', 'demographics', 'clinical_present') if key in batch}
+    if model.role == 'clinical_teacher':
+        return model(**args)
     return model(batch['visual'].to(device, non_blocking=True), batch['mask'].to(device, non_blocking=True), **args)
 
 
 def dataset_for(store, split, visual_key, role, name, seed=0, indices=None):
     mode = {'teacher_demographics': 'demographics', 'teacher_visual_control': 'masked',
             'teacher_shuffled': 'shuffled' if split == 'train' else 'full'}.get(name, 'full')
-    return VisitDataset(store, split, visual_key, role=role, indices=indices,
+    return VisitDataset(store, split, visual_key, role='multimodal_teacher' if role == 'clinical_teacher' else role, indices=indices,
                         clinical_mode=mode, shuffle_seed=seed)
 
 
@@ -198,7 +240,8 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
     indices = np.arange(len(train_data['ids'])) if indices is None else np.asarray(indices)
     protocol = {'source': code_hash(), 'features': store.identity, 'config': config, 'name': name,
                 'seed': seed, 'training_ids': train_data['ids'][indices].tolist(),
-                'fixed_epochs': fixed_epochs, 'targets': target_identity, 'spec': spec}
+                'fixed_epochs': fixed_epochs, 'targets': target_identity, 'spec': spec,
+                'scheduler': {'kind': 'cosine', 'horizon_epochs': config['epochs']}}
     identity = object_hash(protocol)
     last_path, best_path = directory / 'last.pt', directory / 'best.pt'
     if (directory / 'protocol.json').exists():
@@ -212,7 +255,10 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
     model = VisitClassifier(**spec).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
     epochs = fixed_epochs if fixed_epochs is not None else config['epochs']
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    # OOF stops at the selected epoch along the SAME schedule as the full Teacher.
+    if epochs > config['epochs']:
+        raise ValueError('Fixed epochs cannot exceed the registered scheduler horizon.')
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
     start, best, bad, history = 0, -1.0, 0, []
     if last_path.exists():
         state = torch.load(last_path, map_location='cpu', weights_only=False)
@@ -247,6 +293,16 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
             ce = F.cross_entropy(out['logits'], labels,
                 label_smoothing=config.get('label_smoothing', 0.1) if name == 'student_label_smoothing' else 0.)
             kd = ce.new_zeros(())
+            if name == 'student_weighted_ce':
+                if targets is None:
+                    raise ValueError('Weighted CE control requires verified train-only OOF weights.')
+                ix = batch['indices'].numpy()
+                weight = torch.from_numpy(targets['reliability'][ix]).to(device)
+                mean = float(targets['reliability'].mean())
+                if mean <= 1e-12:
+                    raise ValueError('Reliability weights collapsed for the weighted CE control.')
+                # Matched CE + lambda * normalized w * auxiliary term; substitute CE for KL.
+                kd = (weight / mean * F.cross_entropy(out['logits'], labels, reduction='none')).mean()
             if name.startswith('kd_'):
                 if targets is None:
                     raise ValueError('KD requires verified train-only OOF targets.')
@@ -294,6 +350,7 @@ def fit(store, directory, config, name, seed, *, indices=None, fixed_epochs=None
         else:
             bad += 1
         row = {'epoch': epoch + 1, 'loss': total / count, 'kd_loss': running_kd / count,
+               'auxiliary_loss_kind': 'weighted_ce' if name == 'student_weighted_ce' else 'kl' if name.startswith('kd_') else 'none',
                'validation_macro_f1': metrics['macro_f1'] if metrics else None,
                'seconds': time.monotonic() - tick, 'learning_rate': optimizer.param_groups[0]['lr']}
         history.append(row); pd.DataFrame(history).to_csv(directory / 'history.csv', index=False)
@@ -366,7 +423,10 @@ def build_oof(store, root, config, seed, teachers):
         torch.from_numpy(values['multimodal_logits']), torch.from_numpy(data['labels']),
         epsilon=config['visual_support_epsilon'], gate_temperature=config['gate_temperature'])
     values.update({key: value.cpu().numpy() for key, value in weights.items()})
-    for key in {KD_WEIGHT_KEYS[m] for m in config['methods'] if m in KD_WEIGHT_KEYS}:
+    required = {KD_WEIGHT_KEYS[m] for m in config['methods'] if m in KD_WEIGHT_KEYS}
+    if 'student_weighted_ce' in config['methods']:
+        required.add('reliability')
+    for key in required:
         if values[key].mean() <= 1e-12:
             raise ValueError(f'OOF {key} weights collapse to zero. Inspect Teacher quality; no silent CE fallback.')
     temporary = path.with_suffix('.tmp')
@@ -392,12 +452,13 @@ def build_oof(store, root, config, seed, teachers):
 
 
 def study_plan(config):
-    main = len(config['seeds']) * (2 + len(config['methods']))
-    kd = any(x.startswith('kd_') for x in config['methods'])
-    oof = len(config['seeds']) * 2 * config['folds'] if kd else 0
+    main = len(config['seeds']) * (len(teacher_names(config)) + len(config['methods']))
+    oof = len(config['seeds']) * 2 * config['folds'] if needs_oof(config) else 0
     return {'main_fits': main, 'OOF_fits': oof, 'total_fits': main + oof,
             'encoder_training': 'frozen_features', 'seeds': config['seeds'],
-            'systems': ['teacher_visual', 'teacher_multimodal'] + config['methods'],
+            'systems': teacher_names(config) + config['methods'],
+            'scheduler': 'cosine with original config.epochs horizon, including OOF',
+            'study_mode': config.get('study_mode', 'exploratory'),
             'primary_comparisons': PRIMARY_COMPARISONS, 'ablation_comparisons': ABLATION_COMPARISONS,
             'test_opened': False}
 
@@ -407,6 +468,10 @@ def run_study(feature_root, study_root, config, *, require_gpu=True):
     if require_gpu and not torch.cuda.is_available():
         raise RuntimeError('Enable a Kaggle GPU for the full study. CPU is permitted only for explicit debug runs.')
     store = FeatureStore(feature_root, allow_debug=bool(config.get('debug')))
+    from .review import readiness
+    review = readiness(store.metadata, config)
+    if config.get('study_mode') == 'confirmatory' and not review['confirmatory_ready']:
+        raise ValueError('Confirmatory study blocked: ' + ' '.join(review['blockers']))
     if store.metadata['debug'] != bool(config.get('debug')):
         raise ValueError('Research/debug cache and training mode disagree.')
     policy = store.metadata['request']['policy']
@@ -434,6 +499,9 @@ def run_study(feature_root, study_root, config, *, require_gpu=True):
     if (root / 'study.json').exists() and read_json(root / 'study.json')['identity'] != identity:
         raise ValueError('Study inputs/config/source changed. Choose a new run_name; no checkpoint mixing.')
     write_json(root / 'study.json', {'identity': identity, **protocol})
+    write_json(root / 'research_readiness.json', review)
+    if review['blockers']:
+        print('Exploratory evidence only: ' + ' '.join(review['blockers']), flush=True)
     from .runtime import hardware
     write_json(root / 'training_runtime.json', {'hardware': hardware(), 'optimizer_batch': config['batch_size'],
         'accumulation_steps': config['accumulation_steps'], 'head_precision': 'float32',
@@ -443,22 +511,29 @@ def run_study(feature_root, study_root, config, *, require_gpu=True):
         'visits': len(data['ids']), 'patients': len(np.unique(data['patients'])),
         'independent_groups': len(np.unique(data['groups'])),
         'per_class': {name: int((data['labels'] == i).sum()) for i, name in enumerate(store.metadata['class_names'])},
-        'clinical_present_fraction': float(data['clinical_present'].mean())}
+        'clinical_present_fraction': float(data['clinical_present'].mean()),
+        'clinical_by_class': {name: {
+            'cases': int((data['labels'] == i).sum()),
+            'present': int(data['clinical_present'][data['labels'] == i].sum()),
+            'text_vector_present': int(np.any(data['clinical'][data['labels'] == i] != 0, axis=1).sum()),
+            'age_present': int(data['demographics'][data['labels'] == i, 1].sum()),
+            'gender_present': int(np.any(data['demographics'][data['labels'] == i, 2:4] != 0, axis=1).sum())}
+            for i, name in enumerate(store.metadata['class_names'])}}
         for split, data in store.data.items()})
     print(study_plan(config), flush=True)
     results = []
     for seed in config['seeds']:
         teachers = {}
-        for name in ('teacher_visual', 'teacher_multimodal'):
+        for name in teacher_names(config):
             directory = root / name / f'seed_{seed}'
             teachers[name] = fit(store, directory, config, name, seed)
             results.append(teachers[name])
         targets, manifest = (build_oof(store, root / '_oof' / f'seed_{seed}', config, seed, teachers)
-                             if any(m.startswith('kd_') for m in config['methods']) else (None, None))
+                             if needs_oof(config) else (None, None))
         for name in config['methods']:
             result = fit(store, root / name / f'seed_{seed}', config, name, seed,
-                targets=targets if name.startswith('kd_') else None,
-                target_identity=manifest['identity'] if name.startswith('kd_') else None)
+                targets=targets if name.startswith('kd_') or name == 'student_weighted_ce' else None,
+                target_identity=manifest['identity'] if name.startswith('kd_') or name == 'student_weighted_ce' else None)
             results.append(result)
         # Persist predictions after each completed seed, useful when a Kaggle session expires.
         for result in results:

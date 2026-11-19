@@ -1,16 +1,16 @@
 [build-system]
-requires = ["setuptools>=68", "wheel>=0.43"]
+requires = ["setuptools>=68,<82", "wheel>=0.43"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "clindistill-code"
-version = "0.5.1"
+version = "0.6.0"
 description = "COde DINOv3 frozen MIL and group-OOF clinical knowledge distillation"
 requires-python = ">=3.10"
-dependencies = ["numpy", "pandas", "Pillow", "matplotlib", "scikit-learn", "torch>=2.3", "torchvision>=0.18"]
+dependencies = ["numpy", "pandas", "Pillow", "matplotlib", "scikit-learn", "torch>=2.6", "torchvision>=0.21"]
 
 [project.optional-dependencies]
-clinical = ["transformers>=4.57.1,<6", "huggingface-hub>=0.34,<2", "safetensors>=0.4", "sentencepiece>=0.2"]
+clinical = ["transformers==4.57.1", "huggingface-hub==0.36.2", "safetensors>=0.4", "sentencepiece>=0.2"]
 dev = ["nbformat>=5.9", "wheel>=0.43"]
 
 [tool.setuptools.packages.find]

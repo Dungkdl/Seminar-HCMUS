@@ -1,4 +1,4 @@
-"""Standard-library entry point for the COde v4 offline research asset bank.
+"""Standard-library bootstrap for the versioned offline research asset bank.
 
 Run preparation on Linux/Kaggle with Internet. HF_TOKEN is read from the
 environment only and is never copied into the bank or reports.
@@ -17,10 +17,11 @@ import uuid
 import zipfile
 from contextlib import contextmanager
 
-BASE_PACKAGES = ('numpy', 'pandas', 'Pillow', 'matplotlib', 'scipy', 'scikit-learn', 'torch', 'torchvision')
-ADDONS = ('transformers==4.57.1', 'safetensors>=0.4', 'sentencepiece>=0.2')
-BUILD_TOOLS = ('setuptools>=68', 'wheel>=0.43')
-BANK_SCHEMA = 5
+BASE_PACKAGES = ('numpy', 'pandas', 'Pillow', 'matplotlib', 'scipy', 'scikit-learn', 'torch', 'torchvision', 'fsspec')
+ADDONS = ('transformers==4.57.1', 'huggingface-hub==0.36.2', 'safetensors>=0.4', 'sentencepiece>=0.2')
+# Torch 2.11 declares setuptools<82. Do not resolve build tools independently of it.
+BUILD_TOOLS = ('setuptools>=68,<82', 'wheel>=0.43')
+BANK_SCHEMA = 6
 MODEL_IDS = {'student': 'facebook/dinov3-vitb16-pretrain-lvd1689m',
              'teacher': 'facebook/dinov3-vitl16-pretrain-lvd1689m', 'clinical': 'BAAI/bge-m3'}
 CNN_URLS = {'resnet50': 'https://download.pytorch.org/models/resnet50-11ad3fa6.pth',
@@ -103,6 +104,71 @@ def require_preparation_environment(target, actual):
     return bool(bridge)
 
 
+def dependency_report():
+    """Validate the used dependency closure; distinguish unrelated image conflicts."""
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+    distributions = {}
+    for dist in importlib.metadata.distributions():
+        distributions.setdefault(canonicalize_name(dist.metadata['Name']), dist)
+    roots = [Requirement(x) for x in (*BASE_PACKAGES, *ADDONS, *BUILD_TOOLS,
+                                     'torch>=2.6', 'torchvision>=0.21')]
+    used, pending, errors = set(), [r.name for r in roots], []
+
+    def inspect(owner, requirement):
+        req = Requirement(requirement)
+        if req.marker and not req.marker.evaluate({'extra': ''}):
+            return None
+        key = canonicalize_name(req.name)
+        installed = distributions.get(key)
+        if installed is None or (req.specifier and installed.version not in req.specifier):
+            return {'package': owner, 'requires': str(req),
+                    'installed': installed.version if installed else None}
+        return None
+
+    while pending:
+        key = canonicalize_name(pending.pop())
+        if key in used:
+            continue
+        used.add(key)
+        dist = distributions.get(key)
+        if dist is None:
+            continue
+        for requirement in dist.requires or []:
+            req = Requirement(requirement)
+            if req.marker and not req.marker.evaluate({'extra': ''}):
+                continue
+            pending.append(req.name)
+            problem = inspect(key, requirement)
+            if problem:
+                errors.append(problem)
+    for req in roots:
+        problem = inspect('clindistill-runtime', str(req))
+        if problem:
+            errors.append(problem)
+    ambient = []
+    for key, dist in distributions.items():
+        if key in used:
+            continue
+        for requirement in dist.requires or []:
+            problem = inspect(key, requirement)
+            if problem:
+                ambient.append(problem)
+    return {'runtime_conflicts': errors, 'unrelated_image_conflicts': ambient,
+            'used_packages': {k: distributions[k].version for k in sorted(used) if k in distributions},
+            'interpretation': 'Installed metadata compatibility only; not a pretrained/GPU experiment.'}
+
+
+def validate_dependencies():
+    report = dependency_report()
+    if report['runtime_conflicts']:
+        raise RuntimeError('ClinDistill dependency closure is incompatible: ' + json.dumps(report['runtime_conflicts']))
+    if report['unrelated_image_conflicts']:
+        print(f"Unrelated image dependency conflicts: {len(report['unrelated_image_conflicts'])}; "
+              'inspect dependency_report; these libraries are outside the ClinDistill closure.', flush=True)
+    return report
+
+
 def check_online(opener=None):
     """Public, unauthenticated request: network failure is not a rejected HF token."""
     from urllib.request import Request, urlopen
@@ -152,7 +218,7 @@ def source_files(root):
     files += sorted((root / 'clindistill').rglob('*.py')) + sorted((root / 'configs/code').glob('*.json'))
     files += [root / '_support' / name for name in ('research_bank.py', 'image_layout.py', 'kaggle_offline.py',
               'backbone_extension.py', 'training_runtime.py', 'recover_amp_bundle.py', 'TECHNICAL_GUIDE.md',
-              'KAGGLE_RUNBOOK.md', 'VERIFICATION.md')]
+              'KAGGLE_RUNBOOK.md', 'RESEARCH_PROTOCOL.md', 'REVIEW_PROTOCOL.md', 'VERIFICATION.md')]
     return [p for p in files if p.is_file()]
 
 
@@ -180,7 +246,43 @@ def installed_project_matches(files):
     return root / 'clindistill'
 
 
-def prepare(source, destination, *, target_environment=None):
+def reuse_model_assets(previous_bank, destination):
+    """Copy only byte-verified pretrained assets/revisions; never reuse old code or wheels."""
+    previous, destination = Path(previous_bank).resolve(), Path(destination).resolve()
+    info = read_json(previous / 'research_bank_manifest.json')
+    if info.get('schema_version') not in {5, BANK_SCHEMA}:
+        raise ValueError('Reuse requires a checksummed bank5/6, not unversioned model folders.')
+    expected_models = {role: 'models/' + role for role in MODEL_IDS}
+    expected_models.update({role: 'models/' + Path(url).name for role, url in CNN_URLS.items()})
+    if info['models'] != expected_models:
+        raise ValueError('Previous bank model layout/roles differ from the registered assets.')
+    revisions = info.get('model_revisions', {})
+    if set(revisions) != set(MODEL_IDS) or any(revisions[r].get('repo') != repo or not revisions[r].get('revision')
+                                              for r, repo in MODEL_IDS.items()):
+        raise ValueError('Previous bank does not pin the registered pretrained model revisions.')
+    hashes = {name: value for name, value in info['files'].items() if name.startswith('models/')}
+    actual = {p.relative_to(previous).as_posix() for p in (previous / 'models').rglob('*')
+              if p.is_file() and not {'.cache', '__pycache__'} & set(p.relative_to(previous).parts)}
+    if not hashes or set(hashes) != actual:
+        raise ValueError('Previous model files do not match the checksummed model inventory.')
+    for name, expected in hashes.items():
+        source, target = (previous / name).resolve(), (destination / name).resolve()
+        if previous not in source.parents or destination not in target.parents or digest(source) != expected:
+            raise ValueError('Previous model asset is unsafe or its checksum changed.')
+        if target.exists() and digest(target) != expected:
+            raise ValueError('Destination contains different pretrained assets; choose a fresh bank directory.')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.exists():
+            shutil.copy2(source, target)
+    revision_path = destination / 'model_revisions.json'
+    if revision_path.exists() and read_json(revision_path) != revisions:
+        raise ValueError('Destination already pins different model revisions.')
+    write_json(revision_path, revisions)
+    print('Reused checksummed pretrained models/revisions; source and dependency wheels will be rebuilt.', flush=True)
+    return revisions
+
+
+def prepare(source, destination, *, target_environment=None, reuse_models_from=None):
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if platform.system() != 'Linux':
         raise RuntimeError('Prepare binary wheels on Linux/Kaggle, matching the target Python environment.')
@@ -198,6 +300,7 @@ def prepare(source, destination, *, target_environment=None):
         if expected_source != saved:
             raise ValueError('Prepared bank belongs to different source. Choose a new bank directory.')
         return read_json(manifest_path)
+    reused = reuse_model_assets(reuse_models_from, destination) if reuse_models_from else {}
     constraints = destination / 'base-constraints.txt'
     constraints.write_text(''.join(f'{k}=={v}\n' for k, v in base['packages'].items()), encoding='utf-8')
     wheelhouse = destination / 'wheels'; wheelhouse.mkdir(exist_ok=True)
@@ -220,6 +323,8 @@ def prepare(source, destination, *, target_environment=None):
     lock.write_text('\n'.join(locked) + '\n', encoding='utf-8')
     run([sys.executable, '-m', 'pip', 'install', '--no-index', '--find-links', wheelhouse,
          '--constraint', constraints, '--requirement', lock])
+    dependencies = validate_dependencies()
+    write_json(destination / 'dependency_report.json', dependencies)
     payload = destination / 'source'
     for path in source_files(source):
         target = payload / path.relative_to(source); target.parent.mkdir(parents=True, exist_ok=True)
@@ -252,14 +357,15 @@ def prepare(source, destination, *, target_environment=None):
         pinned[role] = {'repo': repo, 'revision': revision}
         write_json(revision_path, pinned)
         target = destination / 'models' / role
-        try:
-            snapshot_download(repo, revision=revision, token=token, local_dir=target,
-                allow_patterns=['*.json', '*.safetensors', 'pytorch_model*.bin', '*.txt', '*.model'],
-                ignore_patterns=['onnx/*', 'onnx/**', '1_Pooling/*', 'imgs/*'])
-        except Exception as exc:
-            # Avoid echoing an authenticated request or token in a notebook traceback.
-            raise RuntimeError(f'Cannot download {repo}. Accept its access terms and set private HF_TOKEN; '
-                               f'original error type: {type(exc).__name__}.') from None
+        if role not in reused:
+            try:
+                snapshot_download(repo, revision=revision, token=token, local_dir=target,
+                    allow_patterns=['*.json', '*.safetensors', 'pytorch_model*.bin', '*.txt', '*.model'],
+                    ignore_patterns=['onnx/*', 'onnx/**', '1_Pooling/*', 'imgs/*'])
+            except Exception as exc:
+                # Avoid echoing an authenticated request or token in a notebook traceback.
+                raise RuntimeError(f'Cannot download {repo}. Accept its access terms and set private HF_TOKEN; '
+                                   f'original error type: {type(exc).__name__}.') from None
         revisions[role] = {'repo': repo, 'revision': revision}
         models[role] = target.relative_to(destination).as_posix()
     import torch
@@ -288,8 +394,10 @@ def prepare(source, destination, *, target_environment=None):
     files['base-constraints.txt'] = digest(constraints)
     files['model_revisions.json'] = digest(revision_path)
     files['requirements.lock'] = digest(lock)
+    files['dependency_report.json'] = digest(destination / 'dependency_report.json')
     manifest = {'schema_version': BANK_SCHEMA, 'status': 'assets_verified_backends_loaded', 'base_environment': base,
                 'preparation_environment': preparation, 'cpu_to_cuda_preparation': cpu_bridge,
+                'reused_pretrained_assets': bool(reused),
                 'backend_validation': 'Local CPU model loading only; GPU execution and full experiments remain unverified.',
                 'models': models, 'model_revisions': revisions, 'files': files,
                 'project_wheel': project[0].relative_to(destination).as_posix(), 'project_files': project_files,
@@ -303,7 +411,7 @@ def prepare(source, destination, *, target_environment=None):
 def verify(root, *, check_environment=True):
     root = Path(root).resolve(); info = read_json(root / 'research_bank_manifest.json')
     if info.get('schema_version') != BANK_SCHEMA:
-        raise ValueError('Expected research bank v5; prepare a new bank instead of mixing old source/wheels.')
+        raise ValueError('Expected research bank v6; prepare a new bank instead of mixing old source/wheels.')
     if check_environment:
         require_environment(info['base_environment'], inventory())
     print('Verifying research bank checksums...', flush=True)
@@ -331,6 +439,7 @@ def activate(root):
     if len(project) != 1:
         raise ValueError('Expected exactly one research project wheel.')
     run([sys.executable, '-m', 'pip', 'install', '--no-index', '--no-deps', '--force-reinstall', project[0]])
+    dependencies = validate_dependencies()
     verify_project_wheel(project[0], root / 'source')
     # Remove source checkouts from import search paths; configs/docs still live in source_root.
     installed_roots = {Path(sysconfig.get_path(key)).resolve() for key in ('purelib', 'platlib')}
@@ -340,7 +449,7 @@ def activate(root):
     print('Installed project wheel:', installed, flush=True)
     return {'root': root, 'source_root': root / 'source',
             'models': {k: root / v for k, v in info['models'].items()}, 'manifest': info,
-            'installed_project': installed}
+            'installed_project': installed, 'dependency_report': dependencies}
 
 
 BOOTSTRAP_CELL = '''from pathlib import Path

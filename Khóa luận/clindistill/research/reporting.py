@@ -10,7 +10,8 @@ from ..artifacts import code_hash, file_hash, object_hash, read_json, write_json
 from ..metrics import classification_metrics, group_bootstrap
 from ..reporting import paired_bootstrap, risk_coverage
 from .data import FeatureStore, VisitDataset, model_assets_hash, encode_images
-from .training import PRIMARY_COMPARISONS, ABLATION_COMPARISONS, load_model, predict, probabilities, write_predictions, dataset_for
+from .training import (PRIMARY_COMPARISONS, ABLATION_COMPARISONS, load_model, predict,
+                       probabilities, write_predictions, dataset_for, teacher_names, student_method)
 from .analysis import teacher_strata, stratum_metrics
 
 
@@ -25,7 +26,7 @@ def freeze_test_protocol(feature_root, study_root, review_record):
     if store.identity != study['features']:
         raise ValueError('Cannot lock a different train/validation feature release.')
     checkpoints = {}
-    for name in ['teacher_visual', 'teacher_multimodal'] + study['config']['methods']:
+    for name in teacher_names(study['config']) + study['config']['methods']:
         for seed in study['config']['seeds']:
             relative = f'{name}/seed_{seed}/best.pt'
             expected = read_json(root / name / f'seed_{seed}/result.json')['checkpoint_sha256']
@@ -71,7 +72,7 @@ def evaluate_study(feature_root, study_root, output_root=None, *, split='validat
     rows, predictions = [], {}
     classes, data = store.metadata['class_names'], store.data[split]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    for name in ['teacher_visual', 'teacher_multimodal'] + cfg['methods']:
+    for name in teacher_names(cfg) + cfg['methods']:
         for seed in cfg['seeds']:
             directory = root / name / f'seed_{seed}'
             result = read_json(directory / 'result.json')
@@ -115,6 +116,8 @@ def evaluate_study(feature_root, study_root, output_root=None, *, split='validat
         'multiplicity': 'Pre-registered contrasts; intervals are unadjusted/descriptive, not confirmatory family-wise tests.'})
     disagreements = {}
     for seed in cfg['seeds']:
+        if not all((name, seed) in predictions for name in ('teacher_visual', 'teacher_multimodal')):
+            continue
         visual = predictions[('teacher_visual', seed)]
         mm = predictions[('teacher_multimodal', seed)]
         if not visual.case_id.equals(mm.case_id):
@@ -123,7 +126,7 @@ def evaluate_study(feature_root, study_root, output_root=None, *, split='validat
                                mm[[f'p_{i}' for i in range(len(classes))]].to_numpy(), data['labels'])
         disagreements[str(seed)] = {name: stratum_metrics(data['labels'],
             predictions[(name, seed)][[f'p_{i}' for i in range(len(classes))]].to_numpy(), classes, strata)
-            for name in ['teacher_visual', 'teacher_multimodal'] + cfg['methods']}
+            for name in teacher_names(cfg) + cfg['methods']}
     write_json(out / 'teacher_strata.json', {'results': disagreements,
         'interpretation': 'Descriptive groups defined by model correctness, not clinical ground truth. '
                           'Subgroup scores are conditional and do not establish clinical dependency.'})
@@ -132,16 +135,18 @@ def evaluate_study(feature_root, study_root, output_root=None, *, split='validat
         'release_stage': study['release_stage'], 'publication_ready': False,
         'pending_reviews': study.get('pending_reviews', ['Unresolved review status.']),
         'annotation_note': study.get('annotation_note'),
+        'research_readiness': read_json(root / 'research_readiness.json'),
         'limitations': ['Frozen foundation encoders; MIL/fusion/head training only.',
             'Single recorded target; clinical temporal alignment and annotation reviews may remain unresolved.',
             'COde internal evaluation only; no external dataset validation.']})
     return table, summary
 
 
-def export_student(feature_root, study_root, encoder_dir, destination, *, method='kd_reliability'):
+def export_student(feature_root, study_root, encoder_dir, destination, *, method=None):
     """Choose a seed using validation only; include the local DINO-B encoder once."""
     root, destination = Path(study_root), Path(destination)
     study = read_json(root / 'study.json'); store = FeatureStore(feature_root, allow_debug=study['debug'])
+    method = method or student_method(study['config'])
     if study['source'] != code_hash() or study['features'] != store.identity:
         raise ValueError('Export protocol/source mismatch.')
     if method not in study['config']['methods'] or method in {'resnet50_mil', 'swin_b_mil'} or method.startswith('teacher_'):

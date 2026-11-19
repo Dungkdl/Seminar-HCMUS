@@ -1,257 +1,183 @@
-# Chạy ClinDistill trên Kaggle bằng wheel offline (0.5.1)
+# Chạy ClinDistill 0.6.0 trên Kaggle
 
-## Cấu trúc assets Qwen đang có và GPU Pro 6000
+Bank6/source 0.6.0; giữ prepared `code_v1` và cache `research_features_v3`0.5.1 nếu checksums/policy/models khớp. **Tạo bank và study mới; không patch bank cũ hoặc resume heads/OOF cũ.** DINO/BGE frozen; GPU trích features, sau đó học heads/MIL/fusion.
 
-Với bộ hiện tại (`data/images`, `cls_train.json`, `cls_test.csv`, `packaging_manifest`), giữ nguyên các file đó. Hai file cls là input của baseline Qwen, không chứa đầy đủ patient/clinical metadata để thay thế prepared release ClinDistill. Gói bổ sung mới dùng metadata từ CODe gốc đã audit, không chia theo split của Qwen.
+## Nếu đã có output feature4.225 train/917 validation
+
+Đây là đường chạy ưu tiên cho các output đã tạo ở bản trước:
 
 ```text
-code_full_offline_assets/
-├── Qwen2.5-VL-3B-Instruct/          # baseline gốc
-├── official_code/                 # baseline gốc
-├── wheelhouse/                    # dependencies baseline gốc
-├── manifest_sha256.json           # manifest baseline gốc
-├── requirements-runtime...        # baseline gốc
-├── data/
-│   ├── images/                    # ảnh đang có
-│   ├── cls_train.json             # baseline gốc
-│   ├── cls_test.csv               # baseline gốc
-│   ├── packaging_manifest...
-│   └── COde_processed/code_v1/     # từ clindistill-assets-addon.zip
-│       ├── release.json
-│       ├── image_index.json       # SHA256 ảnh gốc, kiểm tra ánh xạ ảnh bị làm phẳng
-│       ├── student_single_*.jsonl
-│       └── teacher_context_*.jsonl
-├── clindistill_source/             # từ clindistill-assets-addon.zip
-│   ├── pyproject.toml
-│   ├── clindistill/
-│   ├── configs/
-│   ├── _support/
-│   └── COde_0*.ipynb
-└── clindistill_research_v3/         # output notebook00, tạo trên Linux đích
-    ├── research_bank_manifest.json
-    ├── base-constraints.txt
-    ├── requirements.lock
-    ├── wheels/                     # wheels ClinDistill, tách wheelhouse Qwen
-    ├── models/                     # DINO-B/L, BGE-M3, ResNet/Swin
-    └── source/
+Source0.6.0 + bank5 cũ → notebook00 → bank v6 mới, cùng pretrained weights/revisions
+Cache train/validation cũ + bank v6 → notebook02 Visual → notebook03 Visual
+                              → notebook02 Clinical → notebook03 Clinical
+                              → notebook02 Transfer → notebook03 Transfer
 ```
 
-**Không bắt buộc gom và upload lại ảnh.** Gắn đồng thời dataset assets cũ, dataset addon mới và Notebook Output của bank00; notebook tìm trong toàn bộ `/kaggle/input`. Nếu gom vào một dataset, giải nén addon vào root assets; giữ manifest Qwen nguyên trạng và dùng manifest ClinDistill riêng. Không để nhiều bản prepared release/bank cùng lúc nếu chưa đặt override.
+**Bỏ qua notebook01** nếu cache đã lưu có `feature_manifest.json`, `train.npz`, `validation.npz` và preflight khớp. Không cần upload lại ảnh, prepared metadata hoặc trích features lần nữa chỉ vì nâng source. Notebook02 kiểm tra hash models của bank so với cache trước fit; không khớp phải dừng để chọn đúng bank đã tạo cache.
 
-Trên Windows, từ root repo, build addon gồm source/wheel + prepared metadata + chỉ mục hash ảnh:
+| Phiên | Add Input | Môi trường | Output cần giữ |
+|---|---|---|---|
+| 00 inspect | Source0.6.0 | GPU đích, `MODE='inspect'` | Copy inventory JSON |
+| 00 prepare | Source0.6.0 + output bank cũ | CPU/Internet ON | Bank6 gồm source/wheel/dependencies/weights |
+| 02 visual | Bank6 + output features cũ | GPU/Internet OFF | `runs/code_visual_v6`, Student export |
+| 03 visual | Bank6 + features + output02 visual | GPU/Internet OFF | Validation report |
+| 02/03 clinical | Bank6 + cùng features;03 thêm output02 clinical | GPU/Internet OFF | `runs/code_clinical_v6` và report, không Student export |
+| 02/03 transfer | Bank6 + cùng features;03 thêm output02 transfer | GPU/Internet OFF | `runs/code_transfer_v6`, report và Student export |
+
+Các đường dẫn mẫu dưới đây cần thay bằng **Copy Path** của input thực tế. Root bank chứa `research_bank_manifest.json`; root features chứa `feature_manifest.json`; root study chứa `study.json` và sau khi hoàn thành có `completed.json`.
+
+## 1. Đóng gói local
+
+Từ root repo, dùng Python có setuptools/wheel:
 
 ```powershell
-py -3.14 "Khóa luận/_support/research-notes/package_kaggle.py" --prepared-root "Data/COde_processed/code_v1" --image-root "E:/Hoc Tap/Data/COde-Dataset"
+python -m pip install "setuptools>=68,<82" "wheel>=0.43"
+python "Khóa luận/_support/research-notes/package_kaggle.py"
 ```
 
-`Khóa luận/_support/dist/clindistill-assets-addon.zip` là file cần upload thêm. Nó không chứa ảnh hay weights; có patient/clinical metadata, giữ dataset private. Import các notebook mới từ `_support/dist/notebooks/`, không dùng bản 0.5.0 cũ.
+Output ở `Khóa luận/_support/dist/`: `clindistill-code-source.zip`, `project_wheel/clindistill_code-0.6.0-py3-none-any.whl`, năm notebooks trong `notebooks/`, `package_manifest.json`. Source ZIP mặc định không có dữ liệu/weights. Third-party binary wheels phải tạo trên Linux cùng Python/base image GPU đích, không dùng Windows wheels.
 
-### Chạy theo đúng thứ tự
+Nếu cần prepared ZIP/addon:
 
-1. **00:** gắn addon/source đã giải nén, **Accelerator=None (CPU), Internet ON**, `HF_TOKEN` có quyền DINO, `RUN_MINI_REHEARSAL=False`; `BANK_ROOT=Path('/kaggle/working/clindistill_research_v3')`. So inventory với phiên GPU trước khi tải; Save & Run All, giữ output. Không cài wheelhouse Qwen vào kernel này.
-2. **01 Features Only:** import `COde_01_Features_Only.ipynb`, gắn **assets cũ + addon + output00**, chọn GPU Pro 6000, Internet OFF. Run All chỉ bootstrap và trích features; không cần `complete_dataset.csv`, không chạy lại audit/split. Mặc định chỉ train/validation.
-3. **02:** gắn **output00 + output01**, GPU ON, Internet OFF. Giữ `CONFIG_FILE='research.json'`, `RUN_NAME=None`. Study mới là `runs/code_research_v3`, 66 fits. Profile controls dùng `research_controls.json`, 81 fits; giữ đúng config ở notebook03.
-4. **03:** gắn **output00 + output01 + output02**, `SPLIT='validation'`, `LOCK_TEST_PROTOCOL=False`; Run All. Chưa mở test khi chưa khóa protocol.
+```powershell
+python "Khóa luận/_support/research-notes/package_kaggle.py" --prepared-root "Data/COde_processed/code_v1" --image-root "E:/Hoc Tap/Data/COde-Dataset"
+```
 
-Nếu auto-detect ảnh không đúng, trong cell features đặt root chứa `images`:
+Addon chứa source/wheel và patient/clinical metadata + original image hashes, không chứa ảnh/weights. Giữ addon/dataset/output có dữ liệu trong quyền truy cập phù hợp dữ liệu gốc. Không commit ZIP này.
+
+Upload source ZIP đã giải nén thành input; đặt `PROJECT_ROOT_OVERRIDE` nếu có nhiều source. Không gắn source0.5.1 rồi chạy notebook00 mới; schema guard yêu cầu helper bank v6.
+
+## 2. Notebook00 — inspect GPU target, chuẩn bị CPU online
+
+1. Trên GPU đích chạy `MODE='inspect'` và giữ inventory JSON. Không tải model/đọc Secret trong mode này.
+2. Nếu GPU chặn Internet: dừng phiên, chọn Accelerator=None (CPU), bật Internet, khởi động lại. Copy inventory vào `TARGET_ENVIRONMENT`.
+3. Gắn source 0.6.0, đặt `MODE='prepare'`, `BANK_ROOT=Path('/kaggle/working/clindistill_research_v6')`, `RUN_MINI_REHEARSAL=False`.
+4. Chấp nhận điều khoản [DINO-B](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m)/[DINO-L](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m), tạo Kaggle Secret `HF_TOKEN` và cấp notebook quyền đọc. Không ghi token vào source.
+5. Run All rồi Save Version; phiên sau gắn Notebook Output, không cần download/upload bank lớn lại.
+
+Để dùng lại weights của bank5 đã tạo features, gắn output00 cũ và sửa cell đầu notebook00:
+
+```python
+PROJECT_ROOT_OVERRIDE = Path('/kaggle/input/TEN-SOURCE-MOI')  # root có pyproject.toml và clindistill/
+MODE = 'prepare'
+TARGET_ENVIRONMENT = {...}  # nguyên JSON inventory từ phiên GPU inspect mới
+BANK_ROOT = Path('/kaggle/working/clindistill_research_v6')
+REUSE_MODELS_FROM = Path('/kaggle/input/TEN-OUTPUT-00-CU/clindistill_research_v3')
+RUN_MINI_REHEARSAL = False
+```
+
+`clindistill_research_v3` là tên folder lịch sử của bank5; trỏ theo folder thực tế, không đoán từ version. Đặt source override vì output bank cũ cũng chứa source0.5.1. Chức năng reuse chỉ copy pretrained files đã kiểm tra toàn bộ hashes và giữ nguyên pinned revisions; không mang source/wheels cũ sang bank mới. Không cần tải lại các weights đã xác minh; dependencies/source/wheel được dựng mới. Nếu chưa có bank cũ, giữ `REUSE_MODELS_FROM=None` để tải theo quy trình thông thường.
+
+CPU/GPU phải cùng Python/platform/base scientific packages, **bao gồm fsspec**. Chỉ cho Torch/vision cùng release khác `+cpu`→cùng `+cuNNN`; GPU activation vẫn kiểm tra đúng CUDA build. Không cài wheelhouse baseline vào kernel ClinDistill và không thay Torch/CUDA để ép bank chạy.
+
+Bank gồm:
+
+```text
+clindistill_research_v6/
+  research_bank_manifest.json     # schema6, source/wheel/model checksums
+  base-constraints.txt            # target scientific versions incl. fsspec
+  requirements.lock
+  dependency_report.json         # CPU preparation metadata, not GPU results
+  wheels/                        # project0.6.0 + addons, no Torch/CUDA wheels
+  models/                        # DINO-B/L, BGE-M3, ResNet/Swin
+  source/                        # code, configs, helpers, notebooks, docs
+```
+
+Transformers4.57.1/hub0.36.2 pinned, setuptools<82 bảo vệ requirement Torch2.11. Không tự nâng fsspec. Sau cài đặt, conflict của transitive closure thực dùng gây lỗi trước khi đánh dấu bank ready. Conflict image ngoài closure báo riêng; `RESEARCH_ASSETS['dependency_report']` cho biết trạng thái sau GPU activation. Không gọi toàn bộ image sạch chỉ vì closure của ClinDistill sạch.
+
+CPU model loading không xác nhận GPU execution. Fresh bank v6/activation/training thực vẫn cần chạy trên tài khoản Kaggle của người thực hiện; software tests không thay thế bước này.
+
+## 3. Notebook01 — prepared release và features
+
+Lần đầu gắn bank00 + CODe gốc có `complete_dataset.csv`, `Images/Photographs`, `Images/Radiographs`; Run All audit/export. Nếu có prepared release, dùng **Features Only** để không audit/chia lại split. Gắn bank00 + prepared metadata + ảnh, GPU ON/Internet OFF.
+
+Feature preparation dùng `configs/code/features.json` cho tất cả profiles. Không đổi cohort, max8 policy hoặc preprocessing để xử lý thiếu ảnh. Cache cũ0.5.1 dùng được vì builder không đổi; cache cũ trước0.5.1 cần tạo lại. Không bỏ verification/checksum.
+
+Output:
+
+```text
+/kaggle/working/data/COde_processed/code_v1/
+/kaggle/working/data/COde_processed/research_features_v3/
+  feature_manifest.json           # schema4; tên thư mục v3 không phải schema
+  train.npz
+  validation.npz
+  clinical_audit_summary.json
+```
+
+Save Version giữ release/cache/audit; clinical contexts, feature vectors và IDs là dữ liệu riêng tư. Review nhãn/clinical/near-duplicate còn mở; xem [REVIEW_PROTOCOL.md](REVIEW_PROTOCOL.md).
+
+### Tái dùng ảnh đã làm phẳng
+
+Nếu ảnh đang ở `data/images` của assets cũ, giữ nguyên ảnh và baseline manifests. Gắn addon/prepared metadata với `image_index.json`; cls JSON của baseline không thay patient/clinical metadata ClinDistill.
 
 ```python
 IMAGE_ROOT_OVERRIDE = Path('/kaggle/input/TEN-DATASET/code_full_offline_assets/data')
-# Không trỏ tới cls_train.json. Nếu trỏ trực tiếp thư mục images cũng được.
 IMAGE_BATCH_SIZE = 'auto'
 IMAGE_WORKERS = 'auto'
 CLINICAL_BATCH_SIZE = 'auto'
 ```
 
-Notebook giữ nguyên canonical image paths của CODe, tìm ảnh theo basename trong bundle và so SHA256 với ảnh gốc trước khi chạy encoder. Thiếu ảnh, trùng basename hoặc ảnh đã bị đổi/resize sẽ dừng. Không bỏ ca thiếu ảnh rồi train trên cohort khác; khi đó gắn thêm CODe-Dataset gốc và đặt IMAGE_ROOT_OVERRIDE tới root có `Images/Photographs`.
+Adapter nhận original tree, basename hoặc `sha1(canonical_path)[:10] + '_' + basename`; bắt buộc SHA256 khớp ảnh gốc, phân biệt photo/X-ray cùng basename. Nó tạo canonical filesystem aliases dưới ancestor chung Input/Working, không đổi bytes/installed wheel/manifest. Không ghi đè Images directory có sẵn của người dùng.
 
-### Bundle có tên `images/<10 ký tự hash>_<tên ảnh gốc>`
+`image_layout_report.json` trong working báo coverage/missing_required. Thiếu/sai bytes phải dừng trước encoders; gắn thêm ảnh gốc/supplement đúng release, không lọc bỏ ca để chạy tiếp. Supplement local đã tạo trước có1.417 photos/22,5MB theo max8 policy; đây là reference comparison, không chứng nhận coverage của mọi dataset upload. Test labels không được adapter mở.
 
-Notebook01 mới nhận dạng quy tắc `sha1(canonical_path)[:10] + '_' + basename`. Ví dụ photo `Images/Photographs/0127-001-01.jpg` thành `b42b6cfb7a_0127-001-01.jpg`, còn radiograph cùng basename thành `f3f5a4e7c9_0127-001-01.jpg`. Mỗi file vẫn phải có SHA256 trùng index gốc; không chỉ bỏ prefix rồi lấy file đầu tiên.
+## 4. Notebook02 — chạy từng giai đoạn
 
-Adapter tạo filesystem aliases canonical tại ancestor chung của Input/Working (trên Kaggle là `/kaggle/Images/...`), không đổi bytes hoặc chỉnh installed wheel/bank manifest. Chỉ tạo trong thư mục có marker của adapter; không ghi đè thư mục Images có sẵn của người dùng. `image_layout_report.json` nằm trong `/kaggle/working/data/COde_processed/image_layout/`, ghi ánh xạ, hash identity và coverage. Input và workspace phải có ancestor chung dưới filesystem root. Các alias được tạo lại ở mỗi session.
-
-JSON cls của paper không tham chiếu toàn bộ ảnh của cohort ClinDistill. Theo union `train-cls.json` + `test_cls.json`, thiếu 1.020 ảnh train, 211 validation và 186 test so với photo policy max8 của prepared release hiện tại. Gói `clindistill-cohort-image-supplement.zip` gồm 1.417 ảnh gốc (~22,5 MB) và manifest, không có clinical/labels/weights. Đây là so sánh references local, chưa phải xác nhận toàn bộ file thực có trên Kaggle.
-
-Để chạy với bundle Qwen đã upload:
-
-1. Import notebook01 Features Only mới, gắn **bank00 đã hoàn thành + addon đã có + Qwen assets**.
-2. Giải nén supplement, upload `images/` và `code_image_supplement.json` thành một dataset **private**, gắn thêm vào notebook01. Notebook tự tìm manifest và đối chiếu release_id; không cần thay dataset ảnh lớn hoặc chạy lại notebook00.
-3. Chọn Pro6000, Internet OFF, giữ auto batch/paths và Save & Run All. Chờ `IMAGE LAYOUT READY` rồi các encoder chạy.
-
-Nếu cohort đang yêu cầu còn ảnh thiếu/sai bytes, adapter dừng trước khi trích features, liệt kê `missing_required` trong coverage report. Không giảm cohort hoặc gộp photo với X-ray để chạy tiếp. Test feature extraction vẫn do wheel kiểm tra frozen protocol; adapter không đọc test labels hoặc chạy model trên test.
-
-Tạo lại supplement trên máy từ root repo:
-
-```powershell
-py -3.14 "Khóa luận/_support/research-notes/package_image_supplement.py" --prepared-root "Data/COde_processed/code_v1" --original-root "E:/Hoc Tap/Data/COde-Dataset" --image-index-archive "Khóa luận/_support/dist/code_v1_prepared.zip" --output "Khóa luận/_support/dist/clindistill-cohort-image-supplement.zip"
-```
-
-### Cấu hình hiệu năng
-
-**Khi Kaggle báo `Internet cannot be enabled for this competition with the current accelerator`:** dừng session Pro6000 của notebook00, chọn Accelerator=None, bật Internet và khởi động session mới. Chỉ notebook00 cần mạng để đọc Secrets/tải wheels/weights. Notebook01/02 dùng Pro6000 offline sau khi bank đã lưu.
-
-Notebook00 mới thử kết nối công khai tới Hugging Face trước khi đọc Secrets; phân biệt lỗi mạng, quyền đọc Kaggle Secret và token rỗng, không in giá trị secret hoặc exception có thể chứa nó. Chưa đọc được Secret thì chưa xác thực token với Hugging Face. [Kaggle Secrets client](https://github.com/Kaggle/docker-python/blob/main/patches/kaggle_secrets.py), [Kaggle web client](https://github.com/Kaggle/docker-python/blob/main/patches/kaggle_web_client.py).
-
-CPU và GPU có thể khác Python/Torch/CUDA build. Trên GPU, chạy `MODE='inspect'`, sao chép inventory JSON vào `TARGET_ENVIRONMENT` của notebook00 online. Bản mới cho phép **chỉ Torch và torchvision khác hậu tố `+cpu` → cùng hậu tố `+cuNNN`**, giữ đúng release gốc, Python/platform và tất cả scientific packages. Trường hợp đã ghi nhận ngày 03/11/2026: CPU là torch2.11.0+cpu/torchvision0.26.0+cpu; Pro6000 là torch2.11.0+cu130/torchvision0.26.0+cu130, các mục còn lại khớp. Đây là các bản phân phối CPU/CUDA của cùng release theo [PyTorch](https://pytorch.org/get-started/previous-versions/).
-
-Manifest ghi `preparation_environment` là CPU thật, `base_environment` là GPU đích và chỉ chứng nhận local CPU model loading. Khi activate trên GPU, kiểm tra target vẫn **khớp hoàn toàn**, không bỏ hậu tố CUDA hoặc sửa manifest bằng tay. Wheelhouse addons bị chặn nếu chứa torch/torchvision/torchaudio/triton hoặc NVIDIA CUDA wheels; không cài lại Torch trong CPU/GPU session. Compiled Torch extensions chưa được hỗ trợ bởi cơ chế này.
-
-Notebook00 mới chứa inline helpers nên có thể thay riêng file notebook, dùng tiếp addon0.5.1 đã upload; không cần upload lại ảnh/prepared metadata/source chỉ để sửa thông báo lỗi này.
-
-Notebook in tên GPU, total/free VRAM, compute capability, Torch/CUDA và chạy một kernel kiểm tra. RTX PRO 6000 Blackwell là sm_120; PyTorch 2.7 đã giới thiệu build CUDA 12.8 hỗ trợ Blackwell. Dùng image/build hỗ trợ GPU thực tế; không dùng wheels Windows hoặc tự ghi đè torch của bank trong kernel offline. [NVIDIA GPU list](https://developer.nvidia.com/cuda/gpus), [PyTorch Blackwell support](https://pytorch.org/blog/pytorch-2-7/).
-
-| Công việc | Tự chọn khi còn ≥70 GiB VRAM | Ghi chú |
-|---|---:|---|
-| DINOv3-B | 256 ảnh/batch | Image autocast BF16 nếu GPU hỗ trợ, FP16 nếu không |
-| DINOv3-L | 128 ảnh/batch | OOM tự chia microbatch, giữ thứ tự |
-| ResNet50 / Swin-B | 256 / 128 ảnh/batch | Cùng preprocessing/split |
-| BGE-M3 | 128 văn bản/batch | FP32 như protocol cũ, gom độ dài để giảm padding |
-| Đọc/resize ảnh | tối đa 8 workers, prefetch 2 | Pinned CPU buffers, nonblocking transfer |
-| MIL/head train | batch 32, accumulation 1 | Features resident trên GPU nếu đủ bộ nhớ; FP32 |
-| Validation/predict | batch 256 | Không đổi optimizer steps |
-
-Đây là **điểm khởi đầu theo phần cứng**, chưa được benchmark trên Pro 6000. Nếu GPU ít VRAM trống, batch tự giảm. Không tự tăng learning rate, số ảnh/ca, epochs hay batch tối ưu hóa để chiếm VRAM. Pipeline frozen-feature huấn luyện head nhỏ nên train02 có thể không đạt 100% GPU; đánh giá bằng thời gian/epoch và images/s. `torch.compile` chưa bật mặc định vì có nhiều fit ngắn; FP8 chưa dùng vì cần kiểm chứng sai số riêng.
-
-Đọc `feature_runtime.json` trong cache; log từng chunk có images/s và peak GPU memory (theo kernel session). Nếu cần thử batch lớn hơn sau khi đo, có thể đặt `IMAGE_BATCH_SIZE=256`; chỉ chỉnh feature batching, CUDA OOM của encoder sẽ chia nhỏ. Đặt `IMAGE_WORKERS=0` để xử lý lỗi multiprocessing, hoặc 4 nếu CPU/RAM hạn chế. Giữ cùng source/config/cache khi resume. Nguyên tắc tải dữ liệu: [PyTorch performance tuning](https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html).
-
-Source 0.5.1 cần bank mới và cache `research_features_v3`; prepared split `code_v1` giữ nguyên. Không nối checkpoint/cache 0.5.0 vào study mới.
-
-Quy trình: **đóng gói source trên máy → 00 tải wheels/weights có Internet → 01 xử lý dữ liệu và tạo features → 02 train → 03 đánh giá**.
-
-Code trong phiên Kaggle chạy từ project wheel đã cài, có kiểm tra khớp source. Thư mục source trong bank cung cấp notebook/config/tài liệu. DINO/BGE được cố định; GPU trích features, sau đó chỉ huấn luyện MIL/fusion/head. Đây chưa phải full encoder fine-tuning.
-
-## 1. Tạo gói upload trên Windows
-
-Từ thư mục repo, dùng Python đã có setuptools và wheel. Không cần tải torch/weights để đóng gói:
-
-```powershell
-py -3.14 -m pip install "setuptools>=68" "wheel>=0.43"
-py -3.14 "Khóa luận/_support/research-notes/package_kaggle.py"
-```
-
-Các file được tạo tại `Khóa luận/_support/dist/`:
-
-- `clindistill-code-source.zip`: source, configs, 4 notebook và project wheel mới.
-- `project_wheel/clindistill_code-0.5.1-py3-none-any.whl`: wheel Python thuần, dùng được trên Linux.
-- `package_manifest.json`: SHA256 của các artifact.
-
-Chỉ project wheel là portable. Wheels của dependencies như tokenizers/safetensors phải chuẩn bị trên Linux cùng Python với Kaggle đích; không lấy Windows wheels đưa sang Linux.
-
-Upload source ZIP thành dataset source. Trong Kaggle phải thấy `pyproject.toml`, `clindistill/`, `configs/` và `_support/` sau giải nén. Nếu dịch vụ giữ ZIP nguyên dạng, giải nén vào working trước:
+Gắn bank00 + cache01, GPU ON/Internet OFF, restart kernel/Run All:
 
 ```python
-from pathlib import Path
-import zipfile
-archive = Path('/kaggle/input/TEN-DATASET/clindistill-code-source.zip')
-destination = Path('/kaggle/working/clindistill-source')
-with zipfile.ZipFile(archive) as z:
-    for member in z.infolist():
-        target = (destination / member.filename).resolve()
-        if destination.resolve() not in target.parents or (member.external_attr >> 16) & 0o170000 == 0o120000:
-            raise ValueError('Unsafe ZIP member')
-    z.extractall(destination)
+CONFIG_FILE = 'research_visual.json'
+RUN_NAME = None  # code_visual_v6, mặc định12 fits
 ```
 
-Đặt `PROJECT_ROOT_OVERRIDE` của notebook00 tới thư mục đã giải nén nếu tự tìm thấy nhiều source.
-
-## 2. Notebook00 — chuẩn bị bank khi có Internet
-
-1. Import `COde_00_Kaggle_Offline_Setup.ipynb` từ source mới vào Kaggle.
-2. Add Input: source dataset. Lần đầu chưa cần prepared release hoặc raw data.
-3. Chấp nhận điều khoản ở Hugging Face cho [DINOv3-B](https://huggingface.co/facebook/dinov3-vitb16-pretrain-lvd1689m) và [DINOv3-L](https://huggingface.co/facebook/dinov3-vitl16-pretrain-lvd1689m).
-4. Tạo Kaggle Secret `HF_TOKEN`, cấp quyền cho notebook. Không ghi token vào source.
-5. Chọn **Accelerator=None (CPU)** nếu GPU đích chặn mạng; bật Internet. So `TARGET_ENVIRONMENT` với inventory GPU. Giữ `MODE='prepare'`, `RUN_MINI_REHEARSAL=False`, `BANK_ROOT='/kaggle/working/clindistill_research_v3'`. Run All.
-6. Save Version để giữ output. Phiên sau gắn **Notebook Output**, không cần tải bank về máy rồi upload lại.
-
-Bank chứa `research_bank_manifest.json` schema5, `requirements.lock`, `base-constraints.txt`, `wheels/`, `models/`, `source/`. Model revisions và mọi artifact được ghi checksum. Không có fallback sang random weights khi thiếu quyền model.
-
-Nếu GPU đích chặn Internet, dùng một phiên Linux có Internet để chuẩn bị. Trước đó có thể mở notebook00 trong image GPU đích với `MODE='inspect'` để đối chiếu Python/base packages. Chuẩn bị và chạy phải cùng scientific stack; bootstrap dừng nếu khác, không tự thay torch/torchvision/CUDA.
-
-Dung lượng bank gồm DINO-L/B, BGE-M3 và hai CNN weights. Kiểm tra quota output/disk trong phiên của bạn; chưa có đo thời gian/VRAM Kaggle thực cho bản này.
-
-## 3. Notebook01 — raw data → prepared release → frozen features
-
-Gắn **bank00 + CODe gốc đã giải nén**. Thư mục dữ liệu phải chứa `complete_dataset.csv` và `Images/Photographs`, `Images/Radiographs`.
-
-Trên GPU offline, chạy setup trước mọi import. Nếu tự tìm thấy nhiều dữ liệu, sửa cell cấu hình audit:
+Nếu auto-detect có nhiều input, đặt trong cell đầu02:
 
 ```python
-DATA_ROOT_OVERRIDE = Path('/kaggle/input/TEN-DATASET/COde-Dataset')
+RESEARCH_BANK_OVERRIDE = Path('/kaggle/input/TEN-OUTPUT-00-MOI/clindistill_research_v6')
+FEATURE_ROOT_OVERRIDE = Path('/kaggle/input/TEN-OUTPUT-FEATURES/data/COde_processed/research_features_v3')
+PREVIOUS_STUDY_OVERRIDE = None  # chỉ đặt khi resume đúng profile
+RUN_TRAIN = True
 ```
 
-Lần đầu Run All: kiểm tra ảnh/nhãn → nhóm bệnh nhân và ảnh trùng → khóa split → xuất release → trích features. Quy trình này đọc raw data, không thay đổi dữ liệu gốc.
-
-Đầu ra mặc định:
-
-- `/kaggle/working/_support/audit/code_thesis_v1/`: báo cáo, review candidates và figures.
-- `/kaggle/working/data/COde_processed/code_v1/`: prepared release, manifests, split lock, review status.
-- `/kaggle/working/data/COde_processed/research_features_v3/`: feature manifest, train.npz và validation.npz.
-
-Nếu đã có `code_v1`, gắn prepared release và ảnh; chỉ chạy setup đầu notebook rồi mục15. Đặt `PREPARED_ROOT_OVERRIDE` và `IMAGE_ROOT_OVERRIDE` nếu cần. Không chạy lại chia tập để tìm split thuận lợi.
-
-Cache v1 không dùng với builder mới. Tạo cache v3 trên cùng split. Save Version giữ cả release, cache và audit. Feature vectors/IDs/clinical contexts vẫn là dữ liệu riêng tư.
-
-**Các review cần người thực hiện:** near-duplicate, mapping nhãn, tính đầy đủ annotation và thời điểm clinical. Không bật cờ reviewed chỉ để bỏ cảnh báo. Không có healthy class; single-target là một target được ghi nhận, không khẳng định chỉ mắc một bệnh.
-
-## 4. Notebook02 — train từ cache, không cần gắn raw images
-
-Gắn **bank00 + output cache01**, chọn GPU, tắt Internet, restart kernel rồi Run All từ đầu.
-
-Cell đầu:
+Notebook03 dùng cùng bank/features, cùng `CONFIG_FILE` và:
 
 ```python
-CONFIG_FILE = 'research.json'
-RUN_NAME = None  # tự dùng code_research_v3 từ config
+STUDY_ROOT_OVERRIDE = Path('/kaggle/input/TEN-OUTPUT-02/runs/code_visual_v6')
+SPLIT = 'validation'
+LOCK_TEST_PROTOCOL = False
+TEST_REVIEW_RECORD = None
 ```
 
-Profile mặc định có 12 hệ thống ×3 seeds và 30 Teacher OOF fits = **66 fits**. Bao gồm Student no-KD, label smoothing, Visual/MM KD, confidence/correctness/visual-support/reliability KD, hai Teachers và ResNet/Swin controls.
+Lặp lại02/03 với `research_clinical.json`/`code_clinical_v6`, rồi `research_transfer.json`/`code_transfer_v6`. Chuyển profile không phải resume stage trước. Giữ cùng feature cache/split để so sánh; clinical có/không có lợi đều cần báo trung thực.
 
-Để thêm kiểm chứng multi-image/clinical, đổi **trước khi chạy**:
+Đọc validation bằng notebook03. Tiếp theo `research_clinical.json` 18 fits và `research_transfer.json` 45 fits nếu phù hợp. Core gộp `research.json` 63 fits; extended `research_controls.json` 87 fits. Mỗi profile có run_name riêng; giữ cùng config ở03. Không đổi config giữa chừng/resume study cũ.
 
-```python
-CONFIG_FILE = 'research_controls.json'
-RUN_NAME = None  # code_research_controls_v3, thư mục study riêng
-```
+Visual stage không tạo OOF; clinical stage không xuất Student. KD/weighted CE tạo group-OOF, cosine horizon giữ cùng full Teacher. Đừng diễn giải số fits heads là số lần fine-tune toàn DINO.
 
-Profile này có **81 fits**, thêm Student một ảnh, mean pooling, Teacher demographics-only, Teacher clinical bị hoán vị trong TRAIN, Teacher cùng kiến trúc multimodal nhưng clinical bị mask. Nó dùng cùng cache/split; validation/test không bị hoán vị. Không gộp study khác config vào cùng run_name.
+Output `/kaggle/working/runs/<run_name>/` chứa study/protocol/checkpoints/results/readiness. Student stages thêm `/kaggle/working/student_export/<run_name>/`. Save Version giữ các thư mục này.
 
-Đầu ra: `/kaggle/working/runs/<run_name>/` và `/kaggle/working/student_export/<run_name>/`. Save Version sau train. Không diễn giải số fit heads thành số lần fine-tune toàn bộ DINO.
+Trong output, kiểm tra có `completed.json`, `validation_summary.csv`, `cohort_summary.json`, `research_readiness.json`; transfer có thêm `_oof/seed_*/targets.json` và `weight_diagnostics.json`. Reports03 có `per_seed.csv`, `mean_std.csv`, `paired_comparisons.json`, `teacher_strata.json`, `status.json`. Visual stage có thể không có Teacher-disagreement strata vì không fit MM Teacher.
 
-### Tiếp tục khi Kaggle hết phiên
+Files trong `/kaggle/working` cần được lưu thành Notebook Version có output rồi gắn bằng Add Input ở phiên sau; xem [Kaggle notebook documentation](https://www.kaggle.com/docs/notebooks). Sau Save Version hãy xác nhận những file nêu trên xuất hiện trong Output trước khi dừng phiên. Không mặc định các file chỉ tồn tại ở phiên tương tác đã được lưu.
 
-Gắn output lần trước, giữ nguyên bank/cache/config. Đặt `PREVIOUS_STUDY_OVERRIDE` tới folder có study.json; notebook copy sang working và resume cuối epoch. Nếu working đã có study, để override=None để resume tại chỗ. Source/config/cache thay đổi phải dùng run_name mới; không hứa resume giữa minibatch.
+### Resume
 
-## 5. Notebook03 — đánh giá validation và phân tích lỗi
+Gắn output02 trước đó; đặt `PREVIOUS_STUDY_OVERRIDE` tới `.../runs/<run_name>` của input. Notebook copy sang working rồi resume epoch-boundary. Giữ đúng source/config/cache. Checkpoints đã complete được kiểm tra/reuse; không trộn stage hoặc study khác. Giới hạn session không phải lý do bỏ provenance.
 
-Gắn **bank00 + cache01 + output train02**. Chọn đúng CONFIG_FILE/run_name như 02. Giữ `SPLIT='validation'`, `LOCK_TEST_PROTOCOL=False`, Run All.
+## 5. Notebook03 — validation trước, test sau protocol lock
 
-Đọc các file trong `/kaggle/working/reports/<run_name>/validation/`:
+Gắn bank00 + cache01 + study02. Đặt cùng `CONFIG_FILE`, `SPLIT='validation'`, `LOCK_TEST_PROTOCOL=False`. Báo metric/CI ở validation là exploratory vì checkpoint được chọn trên nó.
 
-- `mean_std.csv`, `per_seed.csv`: metric theo seed và trung bình/độ lệch chuẩn.
-- `paired_comparisons.json`: có MM Teacher−Visual Teacher và MM KD−Visual KD.
-- `teacher_strata.json`: bốn nhóm cả hai đúng/chỉ MM đúng/chỉ Visual đúng/cả hai sai, kết quả từng phương pháp/từng lớp.
-- `status.json`: review còn mở và giới hạn nghiên cứu.
-- Mỗi model/seed có predictions, per-class precision/recall/F1, calibration, confusion matrix và risk–coverage.
+Sau khi chốt phương pháp bằng train/validation:
 
-Trong output train02: `_oof/seed_*/weight_diagnostics.json` và `oof_diagnostics.csv` cho biết trọng số, tỷ lệ gate=0 và effective cases theo lớp/nhóm Teacher. Dùng để kiểm tra gate có giảm hướng dẫn ở lớp hiếm hoặc nhóm chỉ MM đúng không. Đây là bất đồng giữa mô hình, không phải ground truth visual sufficiency.
+1. Notebook03 đặt `LOCK_TEST_PROTOCOL=True`, `TEST_REVIEW_RECORD` mô tả protocol/giới hạn thực, `SPLIT='validation'`. Attached study chỉ đọc được copy vào working trước lock. Save Version giữ `test_protocol.json` và study.
+2. Notebook01 gắn protocol vừa lưu. Copy nguyên cache train/validation từ input sang working, đặt `RESEARCH_FEATURE_OUTPUT_OVERRIDE` tới bản copy, `TEST_PROTOCOL_PATH` tới protocol và `PREPARE_SPLITS=['test']`. Giữ `features.json`/prepared release/model policy. Save Version cache có test.
+3. Notebook03 gắn đúng study đã khóa và cache có test; đặt `SPLIT='test'`, `LOCK_TEST_PROTOCOL=False`, cùng record. Không thay config/checkpoints/source. Không lựa chọn hyperparameter/method/seed sau khi xem test.
 
-## 6. Chỉ mở test sau khi khóa protocol
+Protocol lock không xóa pending reviews hoặc chứng nhận clinical timing. `confirmatory` chỉ được phép khi reviewed release và evidence thực đạt điều kiện. Exploratory test phải ghi giới hạn tương ứng; không biến nó thành kết quả xác nhận.
 
-1. Hoàn thành các thí nghiệm đã đăng ký và lựa chọn bằng train/validation.
-2. Trong 03 vẫn để SPLIT='validation', đặt `LOCK_TEST_PROTOCOL=True`, viết `TEST_REVIEW_RECORD` mô tả protocol đã cố định và review còn mở. Run All. Study từ input sẽ được copy sang working trước khi tạo test_protocol.json. Save Version.
-3. Mở 01, gắn bank + raw images + prepared release + cache train/validation + output 03. Copy cache từ input sang thư mục working; **không sửa cache gốc**. Chạy bootstrap và mục15 với destination là bản copy, PREPARE_SPLITS=['test'], TEST_PROTOCOL_PATH trỏ tới test_protocol.json.
-4. Builder kiểm tra source/feature policy khớp protocol trước khi tạo shard test. Train/validation shards giữ checksum và identity cũ. Save Version.
-5. Mở 03 với cache có đủ ba shards và study đã khóa: SPLIT='test', LOCK_TEST_PROTOCOL=False, cùng TEST_REVIEW_RECORD. Đánh giá một lần theo protocol đã khóa; không điều chỉnh phương pháp theo điểm test.
+## 6. Hiệu năng và việc cần xác nhận
 
-Khóa lưu hash checkpoints/config/source. Thay các mục này sau khi khóa sẽ bị từ chối. Record là xác nhận của người thực hiện, không tự chứng nhận annotation/clinical hay xóa pending reviews.
+Auto profile khi còn≥70GiB: DINO-B/ResNet256, DINO-L/Swin128, text128, tối đa8 workers; encoder OOM chia microbatch giữ thứ tự. Head batch32/accumulation1 FP32; evaluation batch256. Đây là starting profile, chưa phải benchmark tối ưu.
 
-## 7. Kiểm tra trước khi chạy dài
-
-- Bank v5/project0.5.1, cache v3, đúng config/run_name.
-- Bootstrap in đường dẫn project đã cài trong site-packages; không import từ source trong bank.
-- Dùng weights thật có quyền truy cập; debug/tiny-model tests không thay cho pretrained experiments.
-- Chạy mini rehearsal nếu cần sau khi có prepared release. Không báo metric mini như kết quả khóa luận.
-- Giữ output phiên trước, raw predictions và checksums. Code/tests chạy local không chứng minh Kaggle đã train full hoặc phương pháp tốt hơn.
-
-Nguồn kỹ thuật: [pip wheel](https://pip.pypa.io/en/stable/cli/pip_wheel/), [pip download](https://pip.pypa.io/en/stable/cli/pip_download/), [Transformers DINOv3](https://huggingface.co/docs/transformers/v4.57.1/model_doc/dinov3), [BGE-M3](https://huggingface.co/BAAI/bge-m3).
+Đọc `feature_runtime.json`, images/s và peak VRAM; đặt `IMAGE_WORKERS=0` nếu lỗi multiprocessing. Train heads nhỏ không cần chiếm100% GPU. Không đổi LR/optimizer batch/image policy chỉ để tăng VRAM. Cần đo pretrained full training, resume/export và latency/VRAM cấp lượt khám; không suy ra hiệu năng từ synthetic tests.

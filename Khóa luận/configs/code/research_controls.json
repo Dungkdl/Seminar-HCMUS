@@ -1,5 +1,5 @@
 {
-  "run_name": "code_research_controls_v3",
+  "run_name": "code_controls_v6",
   "seeds": [
     2026,
     2027,
@@ -35,7 +35,9 @@
     "student_mean",
     "teacher_demographics",
     "teacher_shuffled",
-    "teacher_visual_control"
+    "teacher_visual_control",
+    "teacher_clinical",
+    "student_weighted_ce"
   ],
   "bootstrap_repetitions": 1000,
   "debug": false,
@@ -56,5 +58,11 @@
   "image_workers": "auto",
   "clinical_batch_size": "auto",
   "evaluation_batch_size": 256,
-  "resident_features": true
+  "resident_features": true,
+  "study_mode": "exploratory",
+  "teachers": [
+    "teacher_visual",
+    "teacher_multimodal"
+  ],
+  "export_method": "kd_reliability"
 }

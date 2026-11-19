@@ -107,7 +107,7 @@ class OnlineSetupTests(unittest.TestCase):
             elif 'wheel' in args:
                 dest = Path(args[args.index('--wheel-dir') + 1])
                 staging = Path(args[-1])
-                with zipfile.ZipFile(dest/'clindistill_code-0.5.1-py3-none-any.whl', 'w') as z:
+                with zipfile.ZipFile(dest/'clindistill_code-0.6.0-py3-none-any.whl', 'w') as z:
                     for p in (staging/'clindistill').rglob('*.py'):
                         z.write(p, p.relative_to(staging).as_posix())
             elif 'install' not in args:
@@ -145,35 +145,37 @@ class OnlineSetupTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'must not contain Torch/CUDA'):
                 bank.prepare(ROOT, Path(d)/'forbidden', target_environment=target)
 
-    def test_replacement_notebook_supports_old_addon_and_inspect_skips_network_and_secrets(self):
+    def test_versioned_notebook_inspect_skips_network_and_prepare_checks_target_first(self):
         doc = json.loads((ROOT / 'COde_00_Kaggle_Offline_Setup.ipynb').read_text(encoding='utf-8'))
         source = ''.join(doc['cells'][1]['source'])
         node = ast.parse(source)
-        helpers = [n for n in node.body if isinstance(n, ast.FunctionDef)
-                   and n.name in {'require_environment', 'require_preparation_environment', 'check_online', 'read_hf_token'}]
-        self.assertEqual(len(helpers), 4)
         tail = next(n for n in node.body if isinstance(n, ast.If)
                     and ast.unparse(n.test) == "MODE == 'prepare'")
-        code = compile(ast.Module(body=helpers + [tail], type_ignores=[]), '<online notebook>', 'exec')
-        # Older addon has inventory/prepare, but none of the new helpers.
-        old = types.SimpleNamespace(inventory=bank.inventory, prepare=Mock())
-        namespace = {'os': os, 'MODE': 'inspect', 'bank': old}
+        code = compile(ast.Module(body=[tail], type_ignores=[]), '<online notebook>', 'exec')
+        current = types.SimpleNamespace(inventory=bank.inventory, prepare=Mock(),
+            require_preparation_environment=bank.require_preparation_environment,
+            check_online=Mock(side_effect=RuntimeError('network blocked')), read_hf_token=Mock())
+        namespace = {'os': os, 'MODE': 'inspect', 'bank': current}
         with contextlib.redirect_stdout(io.StringIO()):
             exec(code, namespace)
-        old.prepare.assert_not_called()
+        current.prepare.assert_not_called()
+        current.check_online.assert_not_called()
+        current.read_hf_token.assert_not_called()
         # A mismatched CPU stack must stop before Secrets or any downloads.
         namespace.update(MODE='prepare', TARGET_ENVIRONMENT={'python_minor': 'wrong'}, source='source', BANK_ROOT='bank')
         with self.assertRaisesRegex(RuntimeError, 'stack differs'):
             exec(code, namespace)
-        old.prepare.assert_not_called()
-        namespace.update(TARGET_ENVIRONMENT=bank.inventory(),
-                         check_online=Mock(side_effect=RuntimeError('network blocked')),
-                         read_hf_token=Mock())
-        tail_code = compile(ast.Module(body=[tail], type_ignores=[]), '<prepare tail>', 'exec')
+        current.prepare.assert_not_called()
+        current.check_online.assert_not_called()
+        namespace.update(TARGET_ENVIRONMENT=bank.inventory())
         with self.assertRaisesRegex(RuntimeError, 'network blocked'):
-            exec(tail_code, namespace)
-        namespace['read_hf_token'].assert_not_called()
-        old.prepare.assert_not_called()
+            exec(code, namespace)
+        current.read_hf_token.assert_not_called()
+        current.prepare.assert_not_called()
+        guard = next(n for n in node.body if isinstance(n, ast.If) and ast.unparse(n.test) == 'bank.BANK_SCHEMA != 6')
+        with self.assertRaisesRegex(RuntimeError, 'bank schema6'):
+            exec(compile(ast.Module(body=[guard], type_ignores=[]), '<bank version>', 'exec'),
+                 {'bank': types.SimpleNamespace(BANK_SCHEMA=5)})
 
 
 if __name__ == '__main__':
