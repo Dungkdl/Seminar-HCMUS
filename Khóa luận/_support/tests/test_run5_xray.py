@@ -2,6 +2,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,10 @@ from test_research_pipeline import PROJECT, config, synthetic_features
 spec = importlib.util.spec_from_file_location('run5', PROJECT / '_support/research-notes/run5_xray.py')
 run5 = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(run5)
+spec6 = importlib.util.spec_from_file_location('run6', PROJECT / '_support/research-notes/run6_xray_fusion.py')
+run6 = importlib.util.module_from_spec(spec6)
+with patch.dict(sys.modules, {'run5_xray': run5}):
+    spec6.loader.exec_module(run6)
 
 
 class Run5Tests(unittest.TestCase):
@@ -73,3 +78,33 @@ class Run5Tests(unittest.TestCase):
                 self.assertEqual(file_hash(best), checksum)
                 with self.assertRaisesRegex(ValueError, 'protocol changed'):
                     run5.run_xray(prepared, cache, root, encoder, out, {**cfg, 'epochs':2})
+
+            fusion = root / 'fusion'
+            with patch.object(run6, 'encode_images', side_effect=encode):
+                summary, contrasts = run6.run_fusion(prepared, cache, root, encoder, fusion, cfg)
+                self.assertEqual(set(summary.index), set(run6.ARMS))
+                self.assertEqual(len(contrasts), 2)
+                self.assertEqual(read_json(fusion/'completed.json')['fits'], 6)
+                self.assertFalse(read_json(fusion/'run6_protocol.json')['test_opened'])
+                self.assertEqual(read_json(fusion/'paired_cohort.json'), read_json(out/'paired_cohort.json'))
+                # The reproduced early arm should match Run 5 under the same frozen inputs.
+                early = read_json(fusion/'metrics.json')['run5_early_fusion/2026']
+                self.assertEqual(early, read_json(out/'metrics.json')['photo_xray_mean/2026'])
+                checkpoint = fusion/'two_branch_photo_xray/seed_2026/best.pt'
+                before = file_hash(checkpoint)
+                run6.run_fusion(prepared, cache, root, encoder, fusion, cfg)
+                self.assertEqual(file_hash(checkpoint), before)
+
+    def test_run6_modalities_and_padding(self):
+        torch.manual_seed(7)
+        masked = run6.TwoBranchMean(3, 8, 0., 2, use_xray=False).eval()
+        full = run6.TwoBranchMean(3, 8, 0., 2, use_xray=True).eval()
+        full.load_state_dict(masked.state_dict())
+        bag = torch.tensor([[[0., 1., 0., 0.], [1., 0., 0., 1.], [0., 7., 9., 0.]]])
+        changed = bag.clone()
+        changed[:, 1, :3] = torch.tensor([0., 0., 5.])
+        mask = torch.tensor([[True, True, False]])
+        with torch.no_grad():
+            torch.testing.assert_close(masked(bag, mask)['logits'], masked(changed, mask)['logits'])
+            self.assertFalse(torch.allclose(full(bag, mask)['logits'], full(changed, mask)['logits']))
+            torch.testing.assert_close(full(bag, mask)['logits'], full(bag[:, :2], mask[:, :2])['logits'])
