@@ -14,7 +14,8 @@ from clindistill.engine import save_checkpoint, seed_everything
 from clindistill.metrics import classification_metrics
 from clindistill.reporting import paired_bootstrap
 from clindistill.research.data import FeatureStore, encode_images, model_assets_hash, resolve_image_sources
-from clindistill.research.training import dataset_for, fit, load_model, loader, predict, probabilities
+from clindistill.research.losses import per_case_kl, weighted_kd
+from clindistill.research.training import dataset_for, fit, forward_batch, load_model, loader, predict, probabilities
 
 from run5_xray import MAX_XRAYS, SPLITS, matched_store, paired_records, selected_xrays
 
@@ -36,12 +37,15 @@ class TwoBranchMean(nn.Module):
     def project_mean(features, mask, projection):
         return (projection(features) * mask.unsqueeze(-1)).sum(1) / mask.sum(1, keepdim=True).clamp_min(1)
 
-    def forward(self, visual, mask):
+    def pooled_features(self, visual, mask):
         features, is_xray = visual[..., :-1], visual[..., -1].bool()
         photo = self.project_mean(features, mask & ~is_xray, self.photo)
         xray = (self.project_mean(features, mask & is_xray, self.xray)
                 if self.use_xray else torch.zeros_like(photo))
-        return {'logits': self.head(self.dropout(torch.cat((photo, xray), dim=-1)))}
+        return self.dropout(torch.cat((photo, xray), dim=-1))
+
+    def forward(self, visual, mask):
+        return {'logits': self.head(self.pooled_features(visual, mask))}
 
 
 def branch_store(early, records, xrays, protocol, arm):
@@ -67,7 +71,8 @@ def branch_store(early, records, xrays, protocol, arm):
         'class_names': early.metadata['class_names']})
 
 
-def fit_branches(store, directory, config, seed, use_xray, device):
+def fit_branches(store, directory, config, seed, use_xray, device, *, teacher_factory=None,
+                 indices=None, fixed_epochs=None, kd_mode=None, targets=None, target_sha256=None):
     """Use the same CE, AdamW, cosine schedule and validation stopping as Run 5."""
     if config['accumulation_steps'] != 1:
         raise ValueError('Run 6 uses the Run 5 setting accumulation_steps=1.')
@@ -75,12 +80,23 @@ def fit_branches(store, directory, config, seed, use_xray, device):
     classes = store.metadata['class_names']
     dimension = store.data['train']['student'].shape[-1] - 1
     seed_everything(seed)
-    model = TwoBranchMean(dimension, config['feature_dim'], config['dropout'], len(classes),
-                          use_xray=use_xray).to(device)
-    identity = object_hash([store.identity, seed, use_xray, code_hash()])
+    model = (TwoBranchMean(dimension, config['feature_dim'], config['dropout'], len(classes), use_xray=use_xray)
+             if teacher_factory is None else teacher_factory(dimension, config, len(classes)))
+    model = model.to(device)
+    if kd_mode not in (None, 'vanilla', 'correctness'):
+        raise ValueError('Unknown KD loss.')
+    if kd_mode and (targets is None or not target_sha256 or model.role != 'student'):
+        raise ValueError('KD requires verified OOF targets and an image-only Student.')
+    epochs = config['epochs'] if fixed_epochs is None else fixed_epochs
+    if not 1 <= epochs <= config['epochs']:
+        raise ValueError('Fixed epochs must fit within the registered cosine schedule.')
+    identity = object_hash([store.identity, seed, use_xray, code_hash(), model.role,
+                            None if indices is None else np.asarray(indices).tolist(),
+                            fixed_epochs, kd_mode, target_sha256])
     best_path, result_path = directory / 'best.pt', directory / 'result.json'
-    train = dataset_for(store, 'train', 'student', 'student', 'student_mean', seed)
-    val = dataset_for(store, 'validation', 'student', 'student', 'student_mean', seed)
+    train = dataset_for(store, 'train', 'student', model.role, 'student_mean', seed, indices)
+    val = (dataset_for(store, 'validation', 'student', model.role, 'student_mean', seed)
+           if fixed_epochs is None else None)
     if result_path.is_file():
         result = read_json(result_path)
         if result['identity'] != identity or result['checkpoint_sha256'] != file_hash(best_path):
@@ -91,21 +107,35 @@ def fit_branches(store, directory, config, seed, use_xray, device):
     optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config['epochs'])
     best, best_epoch, bad, history = -1.0, 0, 0, []
-    for epoch in range(config['epochs']):
+    for epoch in range(epochs):
         model.train()
         for batch in loader(train, config, shuffle=True, epoch=epoch, seed=seed, device=device):
             optimizer.zero_grad(set_to_none=True)
-            logits = model(batch['visual'].to(device), batch['mask'].to(device))['logits']
-            F.cross_entropy(logits, batch['labels'].to(device)).backward()
+            logits = forward_batch(model, batch, device)['logits']
+            loss = F.cross_entropy(logits, batch['labels'].to(device))
+            if kd_mode:
+                ix = batch['indices'].numpy()
+                teacher = torch.from_numpy(targets['logits'][ix]).to(device)
+                if kd_mode == 'correctness':
+                    weights = torch.from_numpy(targets['correct'][ix]).to(device)
+                    kd = weighted_kd(logits, teacher, weights, targets['mean_correct'], config['temperature'])
+                else:
+                    kd = per_case_kl(logits, teacher, config['temperature']).mean()
+                loss = loss + config['kd_weight'] * kd
+            loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 5., error_if_nonfinite=True)
             optimizer.step()
         scheduler.step()
-        logits, ids = predict(model, val, config, device)
-        if ids != store.data['validation']['ids'].tolist():
-            raise ValueError('Validation prediction order differs from paired cohort.')
-        score = classification_metrics(store.data['validation']['labels'], probabilities(logits), classes)['macro_f1']
-        history.append({'epoch': epoch+1, 'validation_macro_f1': score})
-        print(f'two_branch use_xray={use_xray} seed={seed} epoch={epoch+1} val_macro_f1={score:.4f}', flush=True)
+        score = float(epoch + 1)
+        if val is not None:
+            logits, ids = predict(model, val, config, device)
+            if ids != store.data['validation']['ids'].tolist():
+                raise ValueError('Validation prediction order differs from paired cohort.')
+            score = classification_metrics(store.data['validation']['labels'], probabilities(logits), classes)['macro_f1']
+        history.append({'epoch': epoch+1, 'validation_macro_f1': score if val is not None else None})
+        validation_log = f'val_macro_f1={score:.4f}' if val is not None else 'OOF fixed epochs'
+        print(f'{directory.name} role={model.role} kd={kd_mode} seed={seed} epoch={epoch+1}/{epochs} {validation_log}',
+              flush=True)
         if score > best:
             best, best_epoch, bad = score, epoch+1, 0
             save_checkpoint(best_path, model.state_dict())
@@ -120,7 +150,8 @@ def fit_branches(store, directory, config, seed, use_xray, device):
     return model, val, best_epoch
 
 
-def run_fusion(prepared_root, feature_root, image_root, encoder_root, output, config, *, image_batch=32):
+def prepare_paired_inputs(prepared_root, feature_root, image_root, encoder_root, output, config, *,
+                          image_batch=32, run_name='code_run6_xray_fusion_v1', protocol_extra=None):
     output = Path(output)
     release = verify_release(prepared_root, splits=SPLITS)
     photos = FeatureStore(feature_root, splits=SPLITS)
@@ -136,17 +167,18 @@ def run_fusion(prepared_root, feature_root, image_root, encoder_root, output, co
     hashes = {path: file_hash(sources[path]) for path in paths}
     if {hashes[p] for p in paths_by_split['train']} & {hashes[p] for p in paths_by_split['validation']}:
         raise ValueError('Identical X-ray bytes cross train and validation.')
-    config = {**config, 'run_name': 'code_run6_xray_fusion_v1'}
+    config = {**config, 'run_name': run_name}
     runtime = [torch.__version__, torch.version.cuda,
                torch.cuda.get_device_name() if torch.cuda.is_available() else 'cpu', image_batch]
     protocol = {'photo_cache': photos.identity, 'release': release['release_id'], 'encoder': encoder_hash,
                 'xray_bytes': object_hash(hashes), 'max_xrays': MAX_XRAYS, 'max_photos': request['max_photos'],
-                'arms': list(ARMS), 'config': config, 'runtime': runtime, 'test_opened': False, 'source': code_hash(),
+                'config': config, 'runtime': runtime, 'test_opened': False, 'source': code_hash(),
                 'experiment_sha256': file_hash(__file__), 'run5_helper_sha256': file_hash(Path(__file__).with_name('run5_xray.py')),
                 'pending_reviews': release['pending_reviews']}
-    path = output / 'run6_protocol.json'
+    protocol.update(protocol_extra or {'arms': list(ARMS)})
+    path = output / ('run6_protocol.json' if protocol_extra is None else 'run7_protocol.json')
     if path.exists() and read_json(path) != protocol:
-        raise ValueError('Run 6 protocol changed. Select a fresh output directory.')
+        raise ValueError('Paired study protocol changed. Select a fresh output directory.')
     write_json(path, protocol)
     write_json(output / 'paired_cohort.json', {s: {'visits': len(rows),
         'per_class': dict(Counter(row['target_labels'][0] for row in rows))} for s, rows in records.items()})
@@ -157,6 +189,14 @@ def run_fusion(prepared_root, feature_root, image_root, encoder_root, output, co
         raise ValueError('Unexpected frozen X-ray descriptors.')
     xrays = dict(zip(paths, encoded))
     early = matched_store(photos, records, xrays, protocol, 'photo_xray_mean')
+    return photos, records, xrays, early, protocol
+
+
+def run_fusion(prepared_root, feature_root, image_root, encoder_root, output, config, *, image_batch=32):
+    output = Path(output)
+    photos, records, xrays, early, protocol = prepare_paired_inputs(
+        prepared_root, feature_root, image_root, encoder_root, output, config, image_batch=image_batch)
+    config = protocol['config']
     classes = photos.metadata['class_names']
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     rows, frames, details = [], {}, {}
