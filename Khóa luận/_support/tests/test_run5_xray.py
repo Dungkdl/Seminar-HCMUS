@@ -20,6 +20,10 @@ spec6 = importlib.util.spec_from_file_location('run6', PROJECT / '_support/resea
 run6 = importlib.util.module_from_spec(spec6)
 with patch.dict(sys.modules, {'run5_xray': run5}):
     spec6.loader.exec_module(run6)
+spec7 = importlib.util.spec_from_file_location('run7', PROJECT / '_support/research-notes/run7_xray_kd.py')
+run7 = importlib.util.module_from_spec(spec7)
+with patch.dict(sys.modules, {'run6_xray_fusion': run6}):
+    spec7.loader.exec_module(run7)
 
 
 class Run5Tests(unittest.TestCase):
@@ -94,6 +98,25 @@ class Run5Tests(unittest.TestCase):
                 before = file_hash(checkpoint)
                 run6.run_fusion(prepared, cache, root, encoder, fusion, cfg)
                 self.assertEqual(file_hash(checkpoint), before)
+
+            kd = root / 'kd'
+            with patch.object(run6, 'encode_images', side_effect=encode):
+                summary, contrasts = run7.run_kd(prepared, cache, root, encoder, kd, cfg)
+                self.assertEqual(set(summary.index), set(run7.LOSSES))
+                self.assertEqual(len(contrasts), 3)
+                self.assertEqual(read_json(kd/'completed.json')['total_fits'], 12)
+                self.assertFalse(read_json(kd/'run7_protocol.json')['test_opened'])
+                self.assertEqual(read_json(kd/'paired_cohort.json'), read_json(fusion/'paired_cohort.json'))
+                self.assertEqual(read_json(kd/'metrics.json')['ce/2026'],
+                                 read_json(fusion/'metrics.json')['two_branch_photo_xray/2026'])
+                targets = kd/'_oof/seed_2026/targets.npz'
+                with np.load(targets, allow_pickle=False) as data:
+                    self.assertEqual(len(set(data['ids'])), 23)
+                    self.assertEqual(set(data['fold']), {0, 1})
+                    self.assertTrue(np.isfinite(data['logits']).all())
+                saved = file_hash(targets)
+                run7.run_kd(prepared, cache, root, encoder, kd, cfg)
+                self.assertEqual(file_hash(targets), saved)
 
     def test_run6_modalities_and_padding(self):
         torch.manual_seed(7)
